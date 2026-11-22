@@ -1,0 +1,9 @@
+{
+  "schema_status": "项目暂定格式，官方 Schema 待确认",
+  "resources": [],
+  "knowledge_resources": "无",
+  "notes": [
+    "程序包含提示词和确定性事实检查规则，不包含外部临床知识库、向量索引、模型权重或 Adapter。",
+    "BGE-M3 仅保留未来扩展位置，本版本不调用、不依赖。"
+  ]
+}

@@ -1,0 +1,9 @@
+[
+  {
+    "case_id": "REPRO001",
+    "record_cutoff": "T0",
+    "sources": [
+      {"source_id": "S01", "content": "入院前发热，体温最高38.5℃。"}
+    ]
+  }
+]

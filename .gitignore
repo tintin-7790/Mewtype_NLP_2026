@@ -1,0 +1,31 @@
+# macOS / Python caches
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and credentials
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+config/*.json
+!config/*.example.json
+
+# Restricted competition materials and local model assets
+information/
+models/
+checkpoints/
+adapters/
+
+# Generated outputs, logs, and submission archives
+output.json
+run_log.json
+baseline_output.json
+baseline_run_log.json
+*.log
+*.zip
+
