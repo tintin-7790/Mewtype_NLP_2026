@@ -12,6 +12,9 @@ def validate_record(record, case: Case) -> list[dict]:
     issues: list[dict] = []
     if not isinstance(record, dict):
         raise CaseError("INVALID_MODEL_OUTPUT", "模型结果必须是 JSON 对象。")
+    expected = {"case_features", "diagnostic_discussion", "plan", "evidence", "review_items"}
+    if set(record) != expected:
+        issues.append(_issue("error", "FORMAT", "病历顶层字段不完整或含未知字段。"))
     for field in REQUIRED_TEXT:
         if not isinstance(record.get(field), str) or not record[field].strip():
             issues.append(_issue("error", "FORMAT", f"{field} 必须是非空字符串。"))
@@ -23,7 +26,8 @@ def validate_record(record, case: Case) -> list[dict]:
         issues.append(_issue("error", "FORMAT", "review_items 必须是字符串数组。"))
     known = {s.source_id: s.content for s in case.sources}
     for index, item in enumerate(evidence):
-        if not isinstance(item, dict) or not isinstance(item.get("statement"), str):
+        if (not isinstance(item, dict) or set(item) != {"statement", "source_ids", "kind"}
+                or not isinstance(item.get("statement"), str) or not item["statement"].strip()):
             issues.append(_issue("error", "EVIDENCE_FORMAT", f"evidence[{index}] 结构无效。")); continue
         ids = item.get("source_ids")
         if not isinstance(ids, list) or not ids or any(x not in known for x in ids):
@@ -37,9 +41,11 @@ def validate_record(record, case: Case) -> list[dict]:
 
 def _support_checks(statement: str, cited: str, index: int, kind: str | None) -> list[dict]:
     issues = []
-    for match in NUMBER_WITH_CONTEXT.finditer(statement):
+    normalized_statement = normalize_equivalent_dates(statement)
+    normalized_cited = normalize_equivalent_dates(cited)
+    for match in NUMBER_WITH_CONTEXT.finditer(normalized_statement):
         token = match.group("num") + match.group("suffix").replace(" ", "")
-        compact = cited.replace(" ", "")
+        compact = normalized_cited.replace(" ", "")
         if token not in compact and match.group("num") not in compact:
             issues.append(_issue("error", "NUMERIC_SUPPORT", f"evidence[{index}] 的数值/单位“{token}”未在引用来源中找到。"))
     if any(x in statement for x in ("否认", "未见", "无明显", "阴性")) and not any(x in cited for x in ("否认", "未见", "无明显", "阴性", "未闻及")):
@@ -50,6 +56,19 @@ def _support_checks(statement: str, cited: str, index: int, kind: str | None) ->
         issues.append(_issue("warning", "FACT_SUPPORT_LIMITED",
                              f"evidence[{index}] 与引用来源的字面重合较低，程序无法确认语义支持，需人工或模型核验。"))
     return issues
+
+
+def normalize_equivalent_dates(value: str) -> str:
+    """Normalize common equivalent Chinese numeric dates without changing chronology."""
+    def dotted(match):
+        year, month, day = match.group(1), int(match.group(2)), match.group(3)
+        return f"{year}年{month}月" + (f"{int(day)}日" if day else "")
+
+    normalized = re.sub(r"(?<!\d)(\d{4})[./-](\d{1,2})(?:[./-](\d{1,2}))?(?!\d)", dotted, value)
+    normalized = re.sub(r"(?<!\d)(\d{4})年0?(\d{1,2})月(?:0?(\d{1,2})日)?",
+                        lambda match: f"{match.group(1)}年{int(match.group(2))}月" +
+                        (f"{int(match.group(3))}日" if match.group(3) else ""), normalized)
+    return normalized
 
 
 def _has_lexical_support(statement: str, cited: str) -> bool:

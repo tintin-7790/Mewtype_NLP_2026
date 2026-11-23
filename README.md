@@ -1,6 +1,6 @@
 # 循证智录：首次病程记录生成程序
 
-本项目面向教学比赛，不用于真实诊疗。当前版本 `0.3.1` 实现旧赛题输出协议、最新通知的命令行入口、与正式比赛接口隔离的百炼开发适配器，以及可关闭的病例内 Dense 证据检索实验模块；正式 Schema、赛方模型参数和资源配额尚待公布。
+本项目面向教学比赛，不用于真实诊疗。当前版本 `0.4.2` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供问题导向神经符号生成、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订；正式 Schema、赛方模型参数和资源配额尚待公布。
 
 ## 运行
 
@@ -46,7 +46,7 @@ python3.11 main.py --input test_input.json --output baseline_output.json \
   --confirm-fictional-input
 ```
 
-普通运行日志只记录模型标识、请求过的格式、实际成功格式、Token、调用数、耗时和错误，不复制病例或原始回答。调试文件可能包含病例内容，默认关闭，且 `competition`、Evidence Pipeline 和未确认虚构输入时均拒绝启用。
+普通运行日志只记录模型标识、阶段、请求格式、调用/JSON解析状态、解析错误位置、Token、调用数、耗时和错误，不复制病例或原始回答。调试文件可能包含病例内容，默认关闭，且 `competition`、Evidence Pipeline 和未确认虚构输入时均拒绝启用；经确认的虚构 `clinical_pipeline` 病例也可用同一组调试参数定位各阶段原始响应。
 
 离线 mock 必须显式选择并提供按调用顺序排列的响应脚本：
 
@@ -78,12 +78,13 @@ python tools/adapt_practice.py --input practice.json --output adapted.json \
 
 - `baseline`：原始资料 → 一次模型生成 → 格式/来源/有限事实检查 → 输出。
 - `evidence_pipeline`：原始资料 → 事实整理 → 原文+事实约束生成 → 独立核验 → 输出。
+- `clinical_pipeline`：确定性事实编号 → 临床问题规划 → 可选问题级 Dense 检索 → 证据约束写作 → 可选原子事实核验 → 必要时最多一次局部修订 → 确定性复核 → 输出。
 
 事实结构分别表达原文、来源、字段路径、事实内容、时间、数值、单位、肯定/否定/不确定/未提供、完成/进行中/计划及更正关系。原始 sources 始终随生成和核验传入，事实表不是唯一输入。该流程尚未通过同条件医学实验，不能宣称优于 baseline。
 
 ### 可选 Dense 证据检索
 
-Dense 检索只允许显式用于 `evidence_pipeline`，Baseline 路径完全不调用它。检索器将单病例来源切成完整陈述或受控长度片段，保留 `case_id/source_id/field_path/time`，批量编码来源，并缓存病例内来源向量和重复查询。它把每条生成 evidence 的 Top-K 候选交给独立核验器，同时标记明显的否定、时间及计划/完成状态冲突。
+Dense 检索只允许显式用于 `evidence_pipeline` 或 `clinical_pipeline`，Baseline 路径完全不调用它。检索器将单病例来源切成完整陈述或受控长度片段，保留 `case_id/source_id/field_path/time`，批量编码来源，并缓存病例内来源向量和重复查询。它把每条生成 evidence 的 Top-K 候选交给独立核验器，同时标记明显的否定、时间及计划/完成状态冲突。
 
 向量相似度只用于定位候选，既不代表陈述正确，也不会自动覆盖模型声明的 `source_ids`。候选不足时程序向 `review_items` 增加待核提示，现有结构、来源编号、数值、否定和状态校验保持启用。输入协议目前没有逐来源可用时间字段，因此检索严格限定在当前 `Case` 的 sources；调用方仍须保证这些 sources 已按 `record_cutoff` 截断，此限制待正式 Schema 提供来源时间后在适配层加强。
 
@@ -105,11 +106,60 @@ python3 main.py --input input.json --output output.json \
 
 三组 A/B/C 的冻结条件、标注与指标定义见 `docs/retrieval_experiment.md`。
 
-`response_format` 可设为 `text`、`json_object`、`json_schema`。能力回退只按 `fallback_response_formats` 显式执行，每次回退计入预算；MLX 直接适配器不支持的格式直接报错。当前 `json_schema` 仅是客户端扩展位置，在赛方 Schema 和服务能力确认前不要启用。
+### Clinical Pipeline v0.4.2
+
+Clinical Planner 先输出内部问题表，包括优先级、来源属性、支持/反对事实、鉴别诊断、缺失证据、计划目标和检索查询。所有事实使用程序确定生成的 `F001...`，不存在的事实引用会使单例失败。初步诊断必须标记为 `documented_problem` 或 `mixed`，不能直接视为已证实结论。
+
+启用检索时，每个问题的查询只检索当前病例 sources，形成包含来源、字段路径、原文、相似度、时间、断言和状态冲突提示的 Evidence Bundle。Writer 同时接收原始 sources、事实、问题表和证据包；检索结果不是唯一输入，也不自动成为最终 evidence。
+
+Writer 之后，程序对五个输出部分拆分原子陈述。确定性规则先检查未知写成否定、频次缺失、事实反转、诊断确定程度、更正、时间和计划状态；可选 Qwen Verifier 再批量返回逐 claim verdict 与结构化问题。HIGH 优先触发第四次局部修订；MEDIUM 不使整例失败，进入待核事项；LOW 不触发额外调用。无来源的 GROUNDED/PARTIALLY_GROUNDED 推断不会伪造来源，而会降级为 REQUIRES_CLINICIAN_REVIEW。若修订未启用、预算不足或修订响应无效，程序对已精确定位的 HIGH 陈述进行保守替换并在 review_items 披露，内部标记 `fallback_disclosed`，不伪装为完全核验通过。未定位字段保持不变；修订最多一轮，之后重新执行确定性规则和原有 validation。
+
+消融运行方式：
+
+```bash
+# B：Planner + Writer，共2次Qwen；无Embedding、无核验/修订
+python3.11 main.py --input input.json --output b.json --mode dev_api \
+  --pipeline clinical_pipeline --clinical-verification off --clinical-revision off
+
+# C：B + 问题级Dense检索
+python3.11 main.py --input input.json --output c.json --mode dev_api \
+  --pipeline clinical_pipeline --clinical-verification off --clinical-revision off \
+  --retrieval-config config/retrieval.local.json
+
+# D：C + 原子事实核验；不调用模型修订，HIGH 使用保守替换并披露
+python3.11 main.py --input input.json --output d.json --mode dev_api \
+  --pipeline clinical_pipeline --clinical-verification on --clinical-revision off \
+  --retrieval-config config/retrieval.local.json
+
+# E：完整流程；正常3次Qwen，必要时第4次局部修订
+python3.11 main.py --input input.json --output e.json --mode dev_api \
+  --pipeline clinical_pipeline --clinical-verification on --clinical-revision on \
+  --retrieval-config config/retrieval.local.json
+```
+
+不提供 `--retrieval-config` 时 B/D/E 均可运行，用于检索消融。Planner、Medical Record、Verification 和 Revision 分别使用 `PLANNER_SCHEMA`、`MEDICAL_SCHEMA`、`VERIFIER_SCHEMA` 和 `REVISER_SCHEMA`，解析后仍执行程序侧字段、枚举和引用校验。默认继续采用配置中的格式；可用 `--clinical-response-format json_schema` 显式要求所有阶段使用各自 Schema，也可通过 `--planner-response-format`、`--writer-response-format`、`--verifier-response-format`、`--reviser-response-format` 单独覆盖为 `text/json_object/json_schema`。服务不支持时直接报告 `RESPONSE_FORMAT_REJECTED`，不会自动假装支持；仅配置文件中显式声明的 fallback 才可能增加调用。competition 配置的 `max_calls_per_case` 必须覆盖所选消融的2/3/4次预算，且不能因百炼支持而假定赛方内网支持。
+
+虚构 `TEST001` 的分阶段结构化输出调试示例：
+
+```bash
+python3.11 main.py --input test_input.json --output clinical_output.json \
+  --log clinical_run_log.json --mode dev_api --pipeline clinical_pipeline \
+  --clinical-verification on --clinical-revision on \
+  --clinical-response-format json_schema \
+  --debug-raw-response clinical_raw_response.json --confirm-fictional-input
+```
+
+若服务明确拒绝某一阶段的 `json_schema`，先保留拒绝日志，再显式把该阶段改为已验证的 `json_object`，例如 `--verifier-response-format json_object`；程序不做静默回退。
+
+最终 evidence 目标为3–5条且绝不超过5条。程序会先移除结构或来源无效项、合并确定性重复项，再按数值/否定/更正/诊断状态/时间价值及来源覆盖选择；不足3条时按实际保留，不补造。无效项会在 review_items 披露。`--clinical-evidence-limit` 只能设为1–5，该限制不删除内部 facts、claims 或检索候选。
+
+`tools/eval_clinical_pipeline.py` 接受包含 A–E 输入、输出、日志和可选人工标注路径的 manifest，自动汇总结构、来源、调用、Token 与耗时；事实支持、诊断依据覆盖、计划对应、局部修订及 Recall@K/MRR 只有提供人工标注时才计算，不使用模型自评冒充真值。格式见 `docs/clinical_experiment.md`。
+
+`response_format` 可设为 `text`、`json_object`、`json_schema`。能力回退只按 `fallback_response_formats` 显式执行，每次回退计入预算；MLX 直接适配器不支持的格式直接报错。分阶段 Schema 已在百炼开发适配器中具备测试入口，但赛事服务能力仍须独立验证。
 
 ## 校验能力边界
 
-程序分开检查结构、来源编号、引用中数值/单位的存在性、否定支持和“计划写成已完成”等风险。数值检查绑定 evidence 陈述与其引用来源，不用全文数字集合冒充医学核验；但规则仍无法判断所有语义支持、临床合理性和隐含时序，警告项需要人工/专业审核。核验失败时不自动补造正文。
+程序分开检查结构、来源编号、引用中数值/单位的存在性、日期等价格式、否定支持和“计划写成已完成”等风险。`2026.05` 与 `2026年5月` 可规范为同一月份，但不同年份或月份仍报告冲突。数值检查绑定 evidence 陈述与其引用来源，不用全文数字集合冒充医学核验；规则仍无法判断所有语义支持、临床合理性和隐含时序，风险项需要人工或专业审核。修订幅度日志仅记录字段、长度、字符变化估计、SequenceMatcher 相似度和文本哈希，不在普通日志复制完整病例。
 
 ## 日志与复现
 
@@ -119,7 +169,7 @@ python3 main.py --input input.json --output output.json \
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 tools/build_package.py --team 团队名称 --version v0.3.1
+python3 tools/build_package.py --team 团队名称 --version v0.4.2
 ```
 
 打包脚本生成一层团队目录，仅包含运行文件、源码、提示词和资源清单，排除 `information/`、配置、凭据、缓存、虚拟环境、测试输出和本地模型。

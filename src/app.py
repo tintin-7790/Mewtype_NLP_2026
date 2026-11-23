@@ -10,13 +10,13 @@ from .errors import CaseError, TaskError
 from .embedding_client import load_embedding_client
 from .io_utils import atomic_write_json
 from .model_client import ChatCompletionsClient, DevApiChatCompletionsClient, MlxDirectClient, MockClient
-from .pipeline import PROMPT_VERSION, run_case
+from .pipeline import CLINICAL_PROMPT_VERSION, PROMPT_VERSION, run_case
 from .protocol import CaseError as ProtocolCaseError
 from .protocol import failed_result, load_standard_cases, success_result
 from .retrieval import DenseEvidenceRetriever
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.2"
 
 
 def parser():
@@ -24,14 +24,25 @@ def parser():
     p.add_argument("--input", required=True, help="标准 JSON 数组；相对路径按当前工作目录解析")
     p.add_argument("--output", required=True, help="输出 JSON；相对路径按当前工作目录解析")
     p.add_argument("--mode", choices=("mock", "local", "dev_api", "competition"), default="competition")
-    p.add_argument("--pipeline", choices=("baseline", "evidence_pipeline"), default="baseline")
+    p.add_argument("--pipeline", choices=("baseline", "evidence_pipeline", "clinical_pipeline"), default="baseline")
     p.add_argument("--config", help="local/competition 模型配置 JSON；dev_api 仅读取指定环境变量")
     p.add_argument("--mock-responses", help="mock 模式响应脚本 JSON")
     p.add_argument("--log", help="运行日志路径；默认与输出同目录的 run_log.json")
-    p.add_argument("--retrieval-config", help="可选 Dense 检索配置 JSON；仅用于 evidence_pipeline")
+    p.add_argument("--retrieval-config", help="可选 Dense 检索配置 JSON；用于 evidence/clinical pipeline")
+    p.add_argument("--clinical-verification", choices=("on", "off"), default="on",
+                   help="clinical_pipeline 是否调用原子事实核验器")
+    p.add_argument("--clinical-revision", choices=("on", "off"), default="on",
+                   help="clinical_pipeline 核验失败时是否最多局部修订一次")
+    p.add_argument("--clinical-evidence-limit", type=int, default=5,
+                   help="clinical_pipeline 最终 evidence 条数上限，默认5")
     p.add_argument("--dev-response-format", choices=("text", "json_object", "json_schema"),
                    help="仅 dev_api Baseline：显式测试服务端输出格式；不自动回退")
-    p.add_argument("--debug-raw-response", help="仅虚构 dev_api Baseline：将原始响应写入独立调试文件")
+    p.add_argument("--clinical-response-format", choices=("text", "json_object", "json_schema"),
+                   help="clinical_pipeline 所有阶段的显式默认格式；不支持时直接失败")
+    for stage in ("planner", "writer", "verifier", "reviser"):
+        p.add_argument(f"--{stage}-response-format", choices=("text", "json_object", "json_schema"),
+                       help=f"仅覆盖 clinical_pipeline 的 {stage} 阶段格式")
+    p.add_argument("--debug-raw-response", help="仅虚构 dev_api 病例：将原始响应写入独立调试文件")
     p.add_argument("--confirm-fictional-input", action="store_true",
                    help="确认输入为允许保存原始响应的虚构开发病例")
     return p
@@ -40,24 +51,38 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv); started = time.time(); run_id = str(uuid.uuid4())
     output = Path(args.output); log_path = Path(args.log) if args.log else output.parent / "run_log.json"
-    log = {"run_id": run_id, "version": VERSION, "prompt_version": PROMPT_VERSION,
+    prompt_version = CLINICAL_PROMPT_VERSION if args.pipeline == "clinical_pipeline" else PROMPT_VERSION
+    log = {"run_id": run_id, "version": VERSION, "prompt_version": prompt_version,
            "environment": args.mode, "pipeline": args.pipeline, "development_label": args.mode != "competition",
            "started_at_epoch": started, "model": None, "parameters": {}, "cases": [], "status": "running"}
     try:
-        config = load_config(Path(args.config) if args.config else None, args.mode, args.pipeline)
+        clinical_verify = args.clinical_verification == "on"
+        clinical_revise = args.clinical_revision == "on"
+        if args.pipeline == "clinical_pipeline" and clinical_revise and not clinical_verify:
+            raise TaskError("CLINICAL_CONFIG_INVALID", "局部修订依赖原子事实核验，不能 verification=off/revision=on。")
+        if args.pipeline == "clinical_pipeline" and not 1 <= args.clinical_evidence_limit <= 5:
+            raise TaskError("CLINICAL_CONFIG_INVALID", "--clinical-evidence-limit 必须在1到5之间。")
+        minimum_calls = _minimum_calls(args.pipeline, clinical_verify, clinical_revise)
+        config = load_config(Path(args.config) if args.config else None, args.mode, args.pipeline, minimum_calls)
         if args.dev_response_format:
             if args.mode != "dev_api" or args.pipeline != "baseline":
                 raise TaskError("DEV_FORMAT_SCOPE_INVALID", "--dev-response-format 仅用于 dev_api Baseline。")
             config.response_format = args.dev_response_format
             config.fallback_response_formats = []
+        clinical_stage_formats = _clinical_stage_formats(args, config.response_format if config else "text")
+        if args.pipeline == "clinical_pipeline":
+            log["clinical_config"] = {"verification": clinical_verify, "localized_revision": clinical_revise,
+                                      "maximum_revision_rounds": 1, "minimum_call_budget": minimum_calls,
+                                      "evidence_limit": args.clinical_evidence_limit,
+                                      "stage_response_formats": clinical_stage_formats}
         recorder = _debug_recorder(args, run_id)
         client, maximum, response_format = _client(args, config)
         if recorder:
             client.debug_hook = recorder.record
         embedding_client = None; retrieval_options = None
         if args.retrieval_config:
-            if args.pipeline != "evidence_pipeline":
-                raise TaskError("RETRIEVAL_PIPELINE_INVALID", "Dense 检索只允许用于 evidence_pipeline。")
+            if args.pipeline not in ("evidence_pipeline", "clinical_pipeline"):
+                raise TaskError("RETRIEVAL_PIPELINE_INVALID", "Dense 检索只允许用于 evidence/clinical pipeline。")
             embedding_client, retrieval_options = load_embedding_client(Path(args.retrieval_config), args.mode)
             log["retrieval"] = {key: value for key, value in retrieval_options.items() if key != "vectors"}
         if config:
@@ -80,6 +105,7 @@ def main(argv=None):
                 calls_before = getattr(client, "total_calls", 0)
                 usage_before = dict(getattr(client, "total_usage", {}))
                 formats_before = len(getattr(client, "format_attempts", []))
+                events_before = len(getattr(client, "call_events", []))
                 if recorder:
                     recorder.current_case_id = item.case_id
                 retriever = (DenseEvidenceRetriever(
@@ -88,8 +114,11 @@ def main(argv=None):
                     min_similarity=retrieval_options["min_similarity"],
                 ) if embedding_client else None)
                 record, meta = run_case(item, client, args.pipeline, response_format, maximum,
-                                        retriever, retrieval_options["top_k"] if retrieval_options else 3)
+                                        retriever, retrieval_options["top_k"] if retrieval_options else 3,
+                                        clinical_verify, clinical_revise, args.clinical_evidence_limit,
+                                        clinical_stage_formats)
                 meta["token_usage"] = _usage_delta(usage_before, getattr(client, "total_usage", {}))
+                meta["stage_calls"] = list(getattr(client, "call_events", []))[events_before:]
                 if args.pipeline == "baseline":
                     attempts = list(getattr(client, "format_attempts", []))[formats_before:]
                     meta["response_formats_attempted"] = attempts
@@ -102,6 +131,7 @@ def main(argv=None):
                 log["cases"].append({"case_id": item.case_id, "status": "failed",
                                      "calls": getattr(client, "total_calls", 0) - calls_before,
                                      "token_usage": _usage_delta(usage_before, getattr(client, "total_usage", {})),
+                                     "stage_calls": list(getattr(client, "call_events", []))[events_before:],
                                      "response_formats_attempted": attempts if args.pipeline == "baseline" else [],
                                      "response_format_used": (getattr(client, "last_response_format", None)
                                                               if args.pipeline == "baseline" and attempts else None),
@@ -125,7 +155,8 @@ def main(argv=None):
 def _client(args, config):
     if args.mode == "mock":
         if not args.mock_responses: raise TaskError("MOCK_CONFIG_MISSING", "mock 模式必须显式提供 --mock-responses。")
-        maximum = 3 if args.pipeline == "evidence_pipeline" else 1
+        maximum = _minimum_calls(args.pipeline, args.clinical_verification == "on",
+                                 args.clinical_revision == "on")
         return MockClient(Path(args.mock_responses)), maximum, "text"
     if config.adapter == "dev_api_chat_completions":
         return DevApiChatCompletionsClient(config), config.max_calls_per_case, config.response_format
@@ -137,6 +168,24 @@ def _client(args, config):
 def _usage_delta(before, after):
     return {key: int(after.get(key, 0)) - int(before.get(key, 0))
             for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+
+
+def _minimum_calls(pipeline: str, clinical_verify: bool, clinical_revise: bool) -> int:
+    if pipeline == "evidence_pipeline":
+        return 3
+    if pipeline == "clinical_pipeline":
+        return 2 + int(clinical_verify) + int(clinical_revise)
+    return 1
+
+
+def _clinical_stage_formats(args, configured: str) -> dict[str, str]:
+    stage_args = {stage: getattr(args, f"{stage}_response_format")
+                  for stage in ("planner", "writer", "verifier", "reviser")}
+    any_clinical_flag = args.clinical_response_format or any(stage_args.values())
+    if any_clinical_flag and args.pipeline != "clinical_pipeline":
+        raise TaskError("CLINICAL_FORMAT_SCOPE_INVALID", "分阶段 response_format 只允许 clinical_pipeline。")
+    common = args.clinical_response_format or configured
+    return {stage: stage_args[stage] or common for stage in stage_args}
 
 
 class _RawResponseRecorder:
@@ -159,8 +208,8 @@ def _debug_recorder(args, run_id: str):
         if args.confirm_fictional_input:
             raise TaskError("DEBUG_CONFIRMATION_UNUSED", "未提供 --debug-raw-response，无需确认虚构输入。")
         return None
-    if args.mode != "dev_api" or args.pipeline != "baseline":
-        raise TaskError("DEBUG_SCOPE_INVALID", "原始响应调试仅允许 dev_api Baseline。")
+    if args.mode != "dev_api" or args.pipeline not in ("baseline", "clinical_pipeline"):
+        raise TaskError("DEBUG_SCOPE_INVALID", "原始响应调试仅允许 dev_api Baseline/Clinical Pipeline。")
     if not args.confirm_fictional_input:
         raise TaskError("DEBUG_CONFIRMATION_REQUIRED", "保存原始响应前必须显式确认输入为虚构开发病例。")
     return _RawResponseRecorder(Path(args.debug_raw_response), run_id)

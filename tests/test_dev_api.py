@@ -11,7 +11,8 @@ from unittest.mock import patch
 from src.app import main
 from src.config import ModelConfig, load_config
 from src.errors import CaseError, TaskError
-from src.model_client import Budget, ChatCompletionsClient, DevApiChatCompletionsClient, MEDICAL_SCHEMA
+from src.model_client import (Budget, ChatCompletionsClient, DevApiChatCompletionsClient,
+                              MEDICAL_SCHEMA, PLANNER_SCHEMA)
 
 
 class FakeResponse:
@@ -70,6 +71,19 @@ class DevApiTests(unittest.TestCase):
         self.assertEqual(client.format_attempts, ["json_schema"])
         self.assertEqual(client.last_response_format, "json_schema")
 
+    def test_stage_json_schema_request_uses_explicit_stage_schema(self):
+        captured = {}
+        payload = {"choices": [{"message": {"content": '{"problems":[]}'}}]}
+        def fake_open(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8")); return FakeResponse(payload)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            client = DevApiChatCompletionsClient(load_config(None, "dev_api", "baseline"))
+            with patch("urllib.request.urlopen", side_effect=fake_open):
+                client.call([], "json_schema", Budget(1), stage="planner", schema=PLANNER_SCHEMA)
+        self.assertEqual(captured["body"]["response_format"]["json_schema"], PLANNER_SCHEMA)
+        self.assertEqual(client.call_events[0]["stage"], "planner")
+        self.assertEqual(client.call_events[0]["response_format"], "json_schema")
+
     def test_json_schema_http_rejection_is_explicit_without_fallback(self):
         error = urllib.error.HTTPError("https://example.invalid", 400, "bad request", {},
                                       io.BytesIO(b'{"message":"json_schema unsupported"}'))
@@ -80,6 +94,7 @@ class DevApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "RESPONSE_FORMAT_REJECTED")
         self.assertEqual(client.total_calls, 1)
         self.assertEqual(client.format_attempts, ["json_schema"])
+        self.assertFalse(client.call_events[0]["call_success"])
 
     def test_competition_client_still_sends_no_authorization(self):
         captured = {}

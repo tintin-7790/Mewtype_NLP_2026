@@ -76,7 +76,10 @@ class SystemTests(unittest.TestCase):
         missing=record(); missing["plan"]=""
         wrong=record("NOPE")
         done,out=self.run_main(inp,[{"content":"not-json"},{"content":json.dumps(missing,ensure_ascii=False)},{"content":json.dumps(wrong,ensure_ascii=False)}])
-        self.assertEqual(done.returncode,0); self.assertEqual([x["status"] for x in json.loads(out.read_text())],["failed"]*3)
+        values=json.loads(out.read_text())
+        self.assertEqual(done.returncode,0); self.assertEqual([x["status"] for x in values],["failed","failed","success"])
+        self.assertEqual(values[2]["medical_record"]["evidence"],[])
+        self.assertTrue(any("来源编号无效" in item for item in values[2]["medical_record"]["review_items"]))
 
     def test_different_working_directory_and_unicode_paths(self):
         inp=self.write("空 格/输入.json",self.standard()); payload=json.dumps(record(),ensure_ascii=False)

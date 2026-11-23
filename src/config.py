@@ -25,7 +25,8 @@ class ModelConfig:
     credential_env: str = ""
 
 
-def load_config(path: Path | None, mode: str, pipeline: str) -> ModelConfig | None:
+def load_config(path: Path | None, mode: str, pipeline: str, minimum_calls: int | None = None) -> ModelConfig | None:
+    minimum = minimum_calls if minimum_calls is not None else _minimum_calls(pipeline)
     if mode == "mock":
         return None
     if mode == "dev_api":
@@ -39,7 +40,7 @@ def load_config(path: Path | None, mode: str, pipeline: str) -> ModelConfig | No
         endpoint = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
         return ModelConfig(environment="dev_api", adapter="dev_api_chat_completions",
                            model=values["QWEN_MODEL"], endpoint=endpoint,
-                           response_format="text", max_calls_per_case=3 if pipeline == "evidence_pipeline" else 1,
+                           response_format="text", max_calls_per_case=minimum,
                            credential_env="DASHSCOPE_API_KEY")
     if path is None:
         raise TaskError("CONFIG_MISSING", "真实运行必须通过 --config 提供模型配置。")
@@ -60,8 +61,15 @@ def load_config(path: Path | None, mode: str, pipeline: str) -> ModelConfig | No
     allowed = {"text", "json_object", "json_schema"}
     if raw.get("response_format", "text") not in allowed:
         raise TaskError("CONFIG_INVALID", "response_format 必须为 text/json_object/json_schema。")
-    minimum = 3 if pipeline == "evidence_pipeline" else 1
     if int(raw["max_calls_per_case"]) < minimum:
         raise TaskError("CONFIG_INVALID", f"{pipeline} 至少需要每例 {minimum} 次调用预算。")
     fields = ModelConfig.__dataclass_fields__
     return ModelConfig(**{key: value for key, value in raw.items() if key in fields})
+
+
+def _minimum_calls(pipeline: str) -> int:
+    if pipeline == "evidence_pipeline":
+        return 3
+    if pipeline == "clinical_pipeline":
+        return 4
+    return 1

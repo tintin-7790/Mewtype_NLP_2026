@@ -26,6 +26,8 @@ output.json
 run_log.json
 baseline_output.json
 baseline_run_log.json
-*_raw_response.json
+clinical_output*.json
+clinical_run_log*.json
+*_raw_response*.json
 *.log
 *.zip
