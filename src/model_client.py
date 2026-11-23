@@ -21,7 +21,7 @@ MEDICAL_SCHEMA = {"name": "medical_record", "strict": True, "schema": {
             "required": ["statement", "source_ids", "kind"], "properties": {
                 "statement": {"type": "string", "minLength": 1},
                 "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-                "kind": {"enum": ["fact", "inference"]}}}},
+                "kind": {"type": "string", "enum": ["fact", "inference"]}}}},
         "review_items": {"type": "array", "items": {"type": "string"}}
     }}}
 
@@ -49,6 +49,8 @@ class MockClient:
 class ChatCompletionsClient:
     def __init__(self, config: ModelConfig):
         self.config = config; self.total_calls = 0; self.total_usage = _empty_usage()
+        self.format_attempts: list[str] = []; self.last_response_format: str | None = None
+        self.debug_hook = None
     def call(self, messages, response_format, budget: Budget):
         formats = [response_format] + list(self.config.fallback_response_formats)
         last = None
@@ -65,13 +67,30 @@ class ChatCompletionsClient:
         headers = self._headers()
         request = urllib.request.Request(self.config.endpoint, json.dumps(body).encode(), headers, method="POST")
         for attempt in range(self.config.max_retries + 1):
-            budget.take(); self.total_calls += 1
+            budget.take(); self.total_calls += 1; self.format_attempts.append(fmt)
             try:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self._record_usage(payload.get("usage"))
-                return payload["choices"][0]["message"]["content"]
+                content = payload["choices"][0]["message"]["content"]
+                self.last_response_format = fmt
+                self._debug({"event": "response", "model": self.config.model,
+                             "requested_response_format": fmt, "content": content,
+                             "usage": payload.get("usage", {})})
+                return content
+            except urllib.error.HTTPError as exc:
+                body_text = exc.read().decode("utf-8", errors="replace")[:4000]
+                self._debug({"event": "http_error", "model": self.config.model,
+                             "requested_response_format": fmt, "http_status": exc.code,
+                             "service_error": body_text})
+                if 400 <= exc.code < 500:
+                    code = "RESPONSE_FORMAT_REJECTED" if fmt in ("json_object", "json_schema") else "MODEL_HTTP_ERROR"
+                    raise CaseError(code, f"模型接口 HTTP {exc.code}，请求格式={fmt}；未执行格式回退。") from exc
+                if attempt == self.config.max_retries:
+                    raise CaseError("MODEL_HTTP_ERROR", f"模型接口 HTTP {exc.code}，请求格式={fmt}。") from exc
             except (urllib.error.URLError, socket.timeout, KeyError, ValueError) as exc:
+                self._debug({"event": "client_error", "model": self.config.model,
+                             "requested_response_format": fmt, "error_type": type(exc).__name__})
                 if attempt == self.config.max_retries:
                     code = "MODEL_TIMEOUT" if isinstance(exc, (socket.timeout, TimeoutError)) else "MODEL_ERROR"
                     raise CaseError(code, f"模型接口失败：{type(exc).__name__}") from exc
@@ -86,6 +105,11 @@ class ChatCompletionsClient:
             value = usage.get(key)
             if isinstance(value, int) and value >= 0:
                 self.total_usage[key] += value
+
+    def _debug(self, event: dict) -> None:
+        hook = getattr(self, "debug_hook", None)
+        if hook is not None:
+            hook(event)
 
 
 class DevApiChatCompletionsClient(ChatCompletionsClient):

@@ -1,6 +1,6 @@
 # 循证智录：首次病程记录生成程序
 
-本项目面向教学比赛，不用于真实诊疗。当前版本 `0.2.0` 实现旧赛题输出协议、最新通知的命令行入口及与正式比赛接口隔离的百炼开发适配器；正式 Schema、赛方模型参数和资源配额尚待公布。
+本项目面向教学比赛，不用于真实诊疗。当前版本 `0.3.1` 实现旧赛题输出协议、最新通知的命令行入口、与正式比赛接口隔离的百炼开发适配器，以及可关闭的病例内 Dense 证据检索实验模块；正式 Schema、赛方模型参数和资源配额尚待公布。
 
 ## 运行
 
@@ -27,6 +27,26 @@ python main.py --input test_input.json --output baseline_output.json \
 ```
 
 `QWEN_BASE_URL` 可以是 OpenAI 兼容服务的 base URL；程序确定性追加 `/chat/completions`。若变量本身已经以 `/chat/completions` 结尾则不重复追加。缺少任一变量时明确失败，不回退 mock、local 或 competition。开发接口使用 Bearer 认证仅限 `dev_api`；competition 客户端继续不发送认证头。
+
+Baseline 默认仍使用 `text`，以免把开发服务能力误认为赛事接口能力。可用下列参数显式测试百炼结构化输出；该测试不配置回退，服务拒绝 `json_schema` 时会返回 `RESPONSE_FORMAT_REJECTED`，不会静默改用 text 或再次调用：
+
+```bash
+python3.11 main.py --input test_input.json --output baseline_output.json \
+  --log baseline_run_log.json --mode dev_api --pipeline baseline \
+  --dev-response-format json_schema
+```
+
+只有确认输入为允许保存原文的虚构开发病例时，才可显式将原始模型响应写到独立文件：
+
+```bash
+python3.11 main.py --input test_input.json --output baseline_output.json \
+  --log baseline_run_log.json --mode dev_api --pipeline baseline \
+  --dev-response-format json_schema \
+  --debug-raw-response baseline_raw_response.json \
+  --confirm-fictional-input
+```
+
+普通运行日志只记录模型标识、请求过的格式、实际成功格式、Token、调用数、耗时和错误，不复制病例或原始回答。调试文件可能包含病例内容，默认关闭，且 `competition`、Evidence Pipeline 和未确认虚构输入时均拒绝启用。
 
 离线 mock 必须显式选择并提供按调用顺序排列的响应脚本：
 
@@ -61,6 +81,30 @@ python tools/adapt_practice.py --input practice.json --output adapted.json \
 
 事实结构分别表达原文、来源、字段路径、事实内容、时间、数值、单位、肯定/否定/不确定/未提供、完成/进行中/计划及更正关系。原始 sources 始终随生成和核验传入，事实表不是唯一输入。该流程尚未通过同条件医学实验，不能宣称优于 baseline。
 
+### 可选 Dense 证据检索
+
+Dense 检索只允许显式用于 `evidence_pipeline`，Baseline 路径完全不调用它。检索器将单病例来源切成完整陈述或受控长度片段，保留 `case_id/source_id/field_path/time`，批量编码来源，并缓存病例内来源向量和重复查询。它把每条生成 evidence 的 Top-K 候选交给独立核验器，同时标记明显的否定、时间及计划/完成状态冲突。
+
+向量相似度只用于定位候选，既不代表陈述正确，也不会自动覆盖模型声明的 `source_ids`。候选不足时程序向 `review_items` 增加待核提示，现有结构、来源编号、数值、否定和状态校验保持启用。输入协议目前没有逐来源可用时间字段，因此检索严格限定在当前 `Case` 的 sources；调用方仍须保证这些 sources 已按 `record_cutoff` 截断，此限制待正式 Schema 提供来源时间后在适配层加强。
+
+离线 mock 示例不联网，也不代表 BGE-M3 效果：
+
+```bash
+PYTHONPATH=. python3 examples/retrieval_mock_demo.py
+```
+
+本地 BGE-M3 仅供获准的开发验证。复制 `config/retrieval.local.example.json`，将 `model` 指向已下载的本地路径；默认 `allow_download=false`，程序不会下载模型。`FlagEmbedding` 是开发环境可选依赖，未写入正式 `requirements.txt`。启用命令示例：
+
+```bash
+python3 main.py --input input.json --output output.json \
+  --mode local --config config/local.mlx.json --pipeline evidence_pipeline \
+  --retrieval-config config/retrieval.local.json
+```
+
+`competition` 模式禁止 `mock` 和 `local_bge` 检索配置，只接受 `official`。当前 `OfficialEmbeddingClient.embed()` 是明确失败的协议边界；赛方公布后只在 `src/embedding_client.py` 中替换该方法并补充配置解析、认证、超时、重试和配额测试，不改病例处理、检索、核验或输出代码。不能因本地支持 Dense/Sparse/ColBERT 而假定赛方具备后两者。
+
+三组 A/B/C 的冻结条件、标注与指标定义见 `docs/retrieval_experiment.md`。
+
 `response_format` 可设为 `text`、`json_object`、`json_schema`。能力回退只按 `fallback_response_formats` 显式执行，每次回退计入预算；MLX 直接适配器不支持的格式直接报错。当前 `json_schema` 仅是客户端扩展位置，在赛方 Schema 和服务能力确认前不要启用。
 
 ## 校验能力边界
@@ -74,8 +118,8 @@ python tools/adapt_practice.py --input practice.json --output adapted.json \
 ## 测试与打包
 
 ```bash
-python -m unittest discover -s tests -v
-python tools/build_package.py --team 团队名称 --version v0.2.0
+python3 -m unittest discover -s tests -v
+python3 tools/build_package.py --team 团队名称 --version v0.3.1
 ```
 
 打包脚本生成一层团队目录，仅包含运行文件、源码、提示词和资源清单，排除 `information/`、配置、凭据、缓存、虚拟环境、测试输出和本地模型。
@@ -95,4 +139,4 @@ python tools/build_package.py --team 团队名称 --version v0.2.0
 
 ## 待确认
 
-赛方正式 Schema、Python/资源限制、Qwen/BGE-M3 完整地址与模型名、认证、生成参数、`response_format` 支持、每例/全任务预算、并发、超时、重试及计费规则、日志 Schema、额外说明和声明材料要求。BGE-M3 当前不调用、不依赖；只有确认必要、获准且完成版本登记后才接入。
+赛方正式 Schema、Python/资源限制、Qwen/BGE-M3 完整地址与模型名、Embedding 请求/响应格式及 1024 维约束、认证、批大小、生成参数、`response_format` 支持、每例/全任务预算、并发、超时、重试及计费规则、日志 Schema、额外说明和声明材料要求。BGE-M3 默认关闭且不是正式依赖；只有确认必要、获准且完成版本登记后才启用 official 适配器。

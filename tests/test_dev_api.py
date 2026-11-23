@@ -1,14 +1,17 @@
 import json
+import io
 import os
 import tempfile
 import unittest
+import urllib.error
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
 from src.app import main
 from src.config import ModelConfig, load_config
-from src.errors import TaskError
-from src.model_client import Budget, ChatCompletionsClient, DevApiChatCompletionsClient
+from src.errors import CaseError, TaskError
+from src.model_client import Budget, ChatCompletionsClient, DevApiChatCompletionsClient, MEDICAL_SCHEMA
 
 
 class FakeResponse:
@@ -53,6 +56,31 @@ class DevApiTests(unittest.TestCase):
         self.assertTrue(captured["request"].get_header("Authorization").startswith("Bearer "))
         self.assertEqual(client.total_usage, {"prompt_tokens": 19, "completion_tokens": 7, "total_tokens": 26})
 
+    def test_json_schema_request_matches_medical_schema(self):
+        captured = {}
+        payload = {"choices": [{"message": {"content": json.dumps(valid_record(), ensure_ascii=False)}}]}
+        def fake_open(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8")); return FakeResponse(payload)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            client = DevApiChatCompletionsClient(load_config(None, "dev_api", "baseline"))
+            with patch("urllib.request.urlopen", side_effect=fake_open):
+                client.call([{"role": "system", "content": "JSON"}], "json_schema", Budget(1))
+        self.assertEqual(captured["body"]["response_format"],
+                         {"type": "json_schema", "json_schema": MEDICAL_SCHEMA})
+        self.assertEqual(client.format_attempts, ["json_schema"])
+        self.assertEqual(client.last_response_format, "json_schema")
+
+    def test_json_schema_http_rejection_is_explicit_without_fallback(self):
+        error = urllib.error.HTTPError("https://example.invalid", 400, "bad request", {},
+                                      io.BytesIO(b'{"message":"json_schema unsupported"}'))
+        with patch.dict(os.environ, self.ENV, clear=True):
+            client = DevApiChatCompletionsClient(load_config(None, "dev_api", "baseline"))
+            with patch("urllib.request.urlopen", side_effect=error), self.assertRaises(CaseError) as caught:
+                client.call([{"role": "system", "content": "JSON"}], "json_schema", Budget(1))
+        self.assertEqual(caught.exception.code, "RESPONSE_FORMAT_REJECTED")
+        self.assertEqual(client.total_calls, 1)
+        self.assertEqual(client.format_attempts, ["json_schema"])
+
     def test_competition_client_still_sends_no_authorization(self):
         captured = {}
         payload = {"choices": [{"message": {"content": "{}"}}]}
@@ -83,6 +111,31 @@ class DevApiTests(unittest.TestCase):
             self.assertEqual(code, 0); self.assertEqual(saved["model"], "qwen-plus")
             self.assertEqual(saved["total_calls"], 1); self.assertEqual(saved["token_usage"]["total_tokens"], 50)
             self.assertEqual(saved["cases"][0]["token_usage"]["total_tokens"], 50)
+
+    def test_raw_response_debug_requires_confirmation_and_stays_out_of_normal_log(self):
+        payload = {"choices": [{"message": {"content": json.dumps(valid_record(), ensure_ascii=False)}}],
+                   "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); inp = root/"input.json"; out = root/"output.json"
+            log = root/"log.json"; debug = root/"raw.json"
+            inp.write_text(json.dumps([{"case_id":"F1","record_cutoff":"T0","sources":[
+                {"source_id":"S01","content":"入院前体温最高38.5℃。"}]}], ensure_ascii=False), encoding="utf-8")
+            base = ["--input",str(inp),"--output",str(out),"--log",str(log),"--mode","dev_api",
+                    "--pipeline","baseline","--dev-response-format","json_schema",
+                    "--debug-raw-response",str(debug)]
+            with patch.dict(os.environ, self.ENV, clear=True):
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(base), 2)
+            self.assertFalse(debug.exists())
+            with patch.dict(os.environ, self.ENV, clear=True), patch("urllib.request.urlopen", return_value=FakeResponse(payload)):
+                self.assertEqual(main(base+["--confirm-fictional-input"]), 0)
+            raw = json.loads(debug.read_text(encoding="utf-8"))
+            self.assertEqual(raw["events"][0]["requested_response_format"], "json_schema")
+            self.assertIn("38.5℃", raw["events"][0]["content"])
+            normal_log = log.read_text(encoding="utf-8")
+            self.assertNotIn("入院前体温最高38.5℃", normal_log)
+            saved = json.loads(normal_log)
+            self.assertEqual(saved["cases"][0]["response_format_used"], "json_schema")
 
 
 if __name__ == "__main__": unittest.main()

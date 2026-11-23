@@ -7,14 +7,16 @@ from pathlib import Path
 
 from .config import load_config
 from .errors import CaseError, TaskError
+from .embedding_client import load_embedding_client
 from .io_utils import atomic_write_json
 from .model_client import ChatCompletionsClient, DevApiChatCompletionsClient, MlxDirectClient, MockClient
 from .pipeline import PROMPT_VERSION, run_case
 from .protocol import CaseError as ProtocolCaseError
 from .protocol import failed_result, load_standard_cases, success_result
+from .retrieval import DenseEvidenceRetriever
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.1"
 
 
 def parser():
@@ -26,6 +28,12 @@ def parser():
     p.add_argument("--config", help="local/competition 模型配置 JSON；dev_api 仅读取指定环境变量")
     p.add_argument("--mock-responses", help="mock 模式响应脚本 JSON")
     p.add_argument("--log", help="运行日志路径；默认与输出同目录的 run_log.json")
+    p.add_argument("--retrieval-config", help="可选 Dense 检索配置 JSON；仅用于 evidence_pipeline")
+    p.add_argument("--dev-response-format", choices=("text", "json_object", "json_schema"),
+                   help="仅 dev_api Baseline：显式测试服务端输出格式；不自动回退")
+    p.add_argument("--debug-raw-response", help="仅虚构 dev_api Baseline：将原始响应写入独立调试文件")
+    p.add_argument("--confirm-fictional-input", action="store_true",
+                   help="确认输入为允许保存原始响应的虚构开发病例")
     return p
 
 
@@ -37,7 +45,21 @@ def main(argv=None):
            "started_at_epoch": started, "model": None, "parameters": {}, "cases": [], "status": "running"}
     try:
         config = load_config(Path(args.config) if args.config else None, args.mode, args.pipeline)
+        if args.dev_response_format:
+            if args.mode != "dev_api" or args.pipeline != "baseline":
+                raise TaskError("DEV_FORMAT_SCOPE_INVALID", "--dev-response-format 仅用于 dev_api Baseline。")
+            config.response_format = args.dev_response_format
+            config.fallback_response_formats = []
+        recorder = _debug_recorder(args, run_id)
         client, maximum, response_format = _client(args, config)
+        if recorder:
+            client.debug_hook = recorder.record
+        embedding_client = None; retrieval_options = None
+        if args.retrieval_config:
+            if args.pipeline != "evidence_pipeline":
+                raise TaskError("RETRIEVAL_PIPELINE_INVALID", "Dense 检索只允许用于 evidence_pipeline。")
+            embedding_client, retrieval_options = load_embedding_client(Path(args.retrieval_config), args.mode)
+            log["retrieval"] = {key: value for key, value in retrieval_options.items() if key != "vectors"}
         if config:
             log["model"] = config.model
             log["parameters"] = {"adapter": config.adapter, "response_format": config.response_format,
@@ -57,15 +79,32 @@ def main(argv=None):
             try:
                 calls_before = getattr(client, "total_calls", 0)
                 usage_before = dict(getattr(client, "total_usage", {}))
-                record, meta = run_case(item, client, args.pipeline, response_format, maximum)
+                formats_before = len(getattr(client, "format_attempts", []))
+                if recorder:
+                    recorder.current_case_id = item.case_id
+                retriever = (DenseEvidenceRetriever(
+                    item, embedding_client,
+                    max_chunk_chars=retrieval_options["max_chunk_chars"],
+                    min_similarity=retrieval_options["min_similarity"],
+                ) if embedding_client else None)
+                record, meta = run_case(item, client, args.pipeline, response_format, maximum,
+                                        retriever, retrieval_options["top_k"] if retrieval_options else 3)
                 meta["token_usage"] = _usage_delta(usage_before, getattr(client, "total_usage", {}))
+                if args.pipeline == "baseline":
+                    attempts = list(getattr(client, "format_attempts", []))[formats_before:]
+                    meta["response_formats_attempted"] = attempts
+                    meta["response_format_used"] = getattr(client, "last_response_format", None)
                 results.append(success_result(item.case_id, record))
                 log["cases"].append({"case_id": item.case_id, "status": "success", **meta})
             except CaseError as exc:
+                attempts = list(getattr(client, "format_attempts", []))[formats_before:]
                 results.append(failed_result(item.case_id, exc.code, exc.message))
                 log["cases"].append({"case_id": item.case_id, "status": "failed",
                                      "calls": getattr(client, "total_calls", 0) - calls_before,
                                      "token_usage": _usage_delta(usage_before, getattr(client, "total_usage", {})),
+                                     "response_formats_attempted": attempts if args.pipeline == "baseline" else [],
+                                     "response_format_used": (getattr(client, "last_response_format", None)
+                                                              if args.pipeline == "baseline" and attempts else None),
                                      "error": exc.code, "error_message": exc.message})
         log["token_usage"] = dict(getattr(client, "total_usage", {}))
         log["total_calls"] = getattr(client, "total_calls", 0)
@@ -98,3 +137,30 @@ def _client(args, config):
 def _usage_delta(before, after):
     return {key: int(after.get(key, 0)) - int(before.get(key, 0))
             for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+
+
+class _RawResponseRecorder:
+    def __init__(self, path: Path, run_id: str):
+        self.path = path
+        self.payload = {
+            "warning": "仅限虚构开发病例；文件含模型原始输出，不得用于真实患者资料。",
+            "run_id": run_id,
+            "events": [],
+        }
+        self.current_case_id = None
+
+    def record(self, event: dict) -> None:
+        self.payload["events"].append({"case_id": self.current_case_id, **event})
+        atomic_write_json(self.path, self.payload)
+
+
+def _debug_recorder(args, run_id: str):
+    if not args.debug_raw_response:
+        if args.confirm_fictional_input:
+            raise TaskError("DEBUG_CONFIRMATION_UNUSED", "未提供 --debug-raw-response，无需确认虚构输入。")
+        return None
+    if args.mode != "dev_api" or args.pipeline != "baseline":
+        raise TaskError("DEBUG_SCOPE_INVALID", "原始响应调试仅允许 dev_api Baseline。")
+    if not args.confirm_fictional_input:
+        raise TaskError("DEBUG_CONFIRMATION_REQUIRED", "保存原始响应前必须显式确认输入为虚构开发病例。")
+    return _RawResponseRecorder(Path(args.debug_raw_response), run_id)

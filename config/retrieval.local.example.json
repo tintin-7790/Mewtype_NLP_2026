@@ -1,0 +1,11 @@
+{
+  "provider": "local_bge",
+  "model": "/absolute/path/to/already-downloaded/bge-m3",
+  "allow_download": false,
+  "use_fp16": false,
+  "batch_size": 12,
+  "max_length": 8192,
+  "top_k": 5,
+  "min_similarity": 0.0,
+  "max_chunk_chars": 240
+}

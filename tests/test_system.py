@@ -119,5 +119,18 @@ class SystemTests(unittest.TestCase):
         done,out=self.run_main(inp,responses,["--pipeline","evidence_pipeline"]); self.assertEqual(done.returncode,0)
         log=json.loads((out.parent/"run_log.json").read_text()); self.assertEqual(log["cases"][0]["calls"],3)
 
+    def test_evidence_pipeline_optional_retrieval_is_logged(self):
+        inp=self.write("i.json",self.standard()); facts={"facts":[{"source_id":"S01","fact_text":"最高38.5℃"}]}
+        responses=[{"content":json.dumps(facts,ensure_ascii=False)}, {"content":json.dumps(record(),ensure_ascii=False)},
+                   {"content":json.dumps({"valid":True,"issues":[],"corrected_record":None},ensure_ascii=False)}]
+        retrieval=self.write("retrieval.json",{"provider":"mock","dimension":32,"top_k":2,"min_similarity":-1})
+        done,out=self.run_main(inp,responses,["--pipeline","evidence_pipeline","--retrieval-config",str(retrieval)])
+        self.assertEqual(done.returncode,0)
+        value=json.loads(out.read_text())[0]["medical_record"]
+        self.assertEqual(value["evidence"][0]["source_ids"],["S01"])
+        log=json.loads((out.parent/"run_log.json").read_text())
+        self.assertEqual(log["retrieval"]["provider"],"mock")
+        self.assertEqual(log["cases"][0]["retrieval"]["embedding_calls"],2)
+
 
 if __name__ == "__main__": unittest.main()

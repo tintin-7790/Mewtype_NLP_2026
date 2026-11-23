@@ -26,6 +26,6 @@ output.json
 run_log.json
 baseline_output.json
 baseline_run_log.json
+*_raw_response.json
 *.log
 *.zip
-
