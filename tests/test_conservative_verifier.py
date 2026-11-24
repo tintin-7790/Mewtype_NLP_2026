@@ -1,7 +1,7 @@
 import unittest
 
 from src.claim_verifier import (deterministic_claim_issues, has_blocking_issues,
-                                normalize_unreferenced_reasoning, validate_verification)
+                                validate_verification, _guard_source_supported_model_issues)
 from src.claim_extractor import extract_claims
 from src.errors import CaseError
 from src.model_client import VERIFIER_SCHEMA
@@ -23,25 +23,66 @@ class ConservativeVerifierTests(unittest.TestCase):
 
     def test_reasonable_clinical_summary_is_not_rejected_for_nonverbatim_wording(self):
         claims = {"C001": claim("发热伴咳嗽原因待查。", "inference", "diagnostic_discussion")}
-        response = {"claims":[{"claim_id":"C001", "verdict":"GROUNDED",
-                               "rationale":"症状支持且保留不确定性", "source_ids":["S1"]}], "issues":[]}
+        response = {"checked_claim_ids":["C001"], "issues":[]}
         validate_verification(response, claims, {"S1"})
+
+    def test_reasonable_differential_and_conditional_plan_are_not_rule_errors(self):
+        case = Case("C", "T0", [Source("S1", "患者发热、咳嗽，病原学结果未提供。")])
+        values = [claim("结合发热、咳嗽，考虑感染性病变可能。", "inference",
+                        "diagnostic_discussion"),
+                  {**claim("建议结合临床情况完善病原学检查，具体方案需医生判断。",
+                           "clinical_plan", "plan"), "claim_id":"C002"}]
+        self.assertEqual(deterministic_claim_issues(case, values), [])
 
     def test_unreferenced_recommendation_is_downgraded_not_given_fake_source(self):
         item = claim("建议结合病情完善病原学检查，具体由医生判断。", "clinical_plan", "plan")
-        response = {"claims":[{"claim_id":"C001", "verdict":"GROUNDED",
-                               "rationale":"合理建议", "source_ids":[]}], "issues":[]}
-        issues = normalize_unreferenced_reasoning(response, {"C001":item})
-        self.assertEqual(response["claims"][0]["verdict"], "REQUIRES_CLINICIAN_REVIEW")
-        self.assertEqual(response["claims"][0]["source_ids"], [])
+        response = {"checked_claim_ids":["C001"], "issues":[{
+            "claim_id":"C001", "code":"UNREFERENCED_INFERENCE", "severity":"medium",
+            "hint":"作为新增建议保留待医生审核。", "source_ids":[]}]}
+        issues = validate_verification(response, {"C001":item}, {"S1"})
         self.assertEqual((issues[0]["severity"], issues[0]["error_type"]),
-                         ("medium", "UNREFERENCED_CLINICAL_RECOMMENDATION"))
-        validate_verification(response, {"C001":item}, {"S1"})
+                         ("medium", "UNREFERENCED_INFERENCE"))
+        self.assertEqual(issues[0]["source_ids"], [])
 
     def test_unmentioned_exam_cannot_be_asserted_unperformed(self):
         case = Case("C", "T0", [Source("S1", "患者发热、咳嗽，病原学资料未提供。")])
         issues = deterministic_claim_issues(case, [claim("痰培养未执行。", "missing_information", "review_items")])
         self.assertIn("UNKNOWN_AS_NEGATIVE", {item["error_type"] for item in issues})
+
+    def test_explicit_right_upper_abdominal_pain_negation_is_supported(self):
+        case = Case("PRACTICE02", "T0", [Source("P0014", "无发热、恶心、呕吐，无右上腹疼痛。")])
+        value = claim("患者无右上腹疼痛。")
+        self.assertEqual(deterministic_claim_issues(case, [value]), [])
+        model_issue = [{**value, "error_type":"UNSUPPORTED_NEGATIVE", "severity":"high",
+                        "revision_hint":"错误地认为未提及。"}]
+        kept, dismissed = _guard_source_supported_model_issues(case, model_issue)
+        self.assertEqual(kept, [])
+        self.assertEqual(dismissed[0]["reason"], "explicit_source_support")
+        combined = claim("患者无恶心、呕吐及右上腹疼痛。")
+        kept, _ = _guard_source_supported_model_issues(case, [{**combined,
+            "error_type":"PATIENT_FACT_CONTRADICTION", "severity":"high",
+            "revision_hint":"错误地判定为冲突。"}])
+        self.assertEqual(kept, [])
+
+    def test_unmentioned_or_positive_symptom_is_not_protected_as_negative(self):
+        negative = claim("患者无胸痛。")
+        absent = Case("C", "T0", [Source("S1", "患者咳嗽。")])
+        kept, _ = _guard_source_supported_model_issues(absent, [{**negative,
+            "error_type":"UNSUPPORTED_NEGATIVE", "severity":"high", "revision_hint":"无来源"}])
+        self.assertEqual(len(kept), 1)
+        positive = Case("C", "T0", [Source("S1", "患者存在胸痛。")])
+        issues = deterministic_claim_issues(positive, [negative])
+        self.assertIn("FACT_CONTRADICTION", {item["error_type"] for item in issues})
+
+    def test_unperformed_exam_cannot_become_negative_result(self):
+        case = Case("C", "T0", [Source("S1", "痰培养尚未检查。")])
+        issues = deterministic_claim_issues(case, [claim("痰培养检查结果阴性。")])
+        self.assertIn("RESULT_AS_AVAILABLE", {item["error_type"] for item in issues})
+
+    def test_same_source_can_preserve_time_specific_positive_and_negative(self):
+        case = Case("C", "T0", [Source("S1", "昨日出现胸痛，今日无胸痛。")])
+        issues = deterministic_claim_issues(case, [claim("今日无胸痛。")])
+        self.assertNotIn("FACT_CONTRADICTION", {item["error_type"] for item in issues})
 
     def test_unprovided_medication_cannot_be_asserted_unused(self):
         case = Case("C", "T0", [Source("S1", "当前用药情况未提供。")])
@@ -79,18 +120,27 @@ class ConservativeVerifierTests(unittest.TestCase):
 
     def test_nonexistent_source_id_is_still_rejected(self):
         claims = {"C001": claim("患者发热。")}
-        response = {"claims":[{"claim_id":"C001", "verdict":"SUPPORTED",
-                               "rationale":"原文支持", "source_ids":["S999"]}], "issues":[]}
+        response = {"checked_claim_ids":["C001"], "issues":[{
+            "claim_id":"C001", "code":"SOURCE_MISMATCH", "severity":"high",
+            "hint":"引用来源不存在。", "source_ids":["S999"]}]}
         with self.assertRaises(CaseError):
             validate_verification(response, claims, {"S1"})
 
-    def test_verifier_schema_keeps_existing_verdict_and_risk_enums(self):
-        claim_enum = VERIFIER_SCHEMA["schema"]["properties"]["claims"]["items"]["properties"]["verdict"]["enum"]
+    def test_verifier_schema_keeps_compact_issue_and_risk_enums(self):
+        code_enum = VERIFIER_SCHEMA["schema"]["properties"]["issues"]["items"]["properties"]["code"]["enum"]
         severity_enum = VERIFIER_SCHEMA["schema"]["properties"]["issues"]["items"]["properties"]["severity"]["enum"]
-        self.assertEqual(set(claim_enum), {"SUPPORTED", "REFUTED", "NOT_ADDRESSED", "GROUNDED",
-                                           "PARTIALLY_GROUNDED", "INSUFFICIENT_EVIDENCE",
-                                           "REQUIRES_CLINICIAN_REVIEW"})
+        self.assertIn("UNSUPPORTED_NEGATIVE", code_enum)
+        self.assertIn("PLAN_AS_COMPLETED", code_enum)
         self.assertEqual(severity_enum, ["high", "medium", "low"])
+
+    def test_checked_claim_ids_must_cover_all_claims_exactly_once(self):
+        claims = {"C001":claim("发热。"), "C002":{**claim("咳嗽。"), "claim_id":"C002"}}
+        with self.assertRaises(CaseError) as missing:
+            validate_verification({"checked_claim_ids":["C001"], "issues":[]}, claims, {"S1"})
+        self.assertEqual(missing.exception.code, "INCOMPLETE_CLAIM_COVERAGE")
+        with self.assertRaises(CaseError) as duplicate:
+            validate_verification({"checked_claim_ids":["C001","C001","C002"], "issues":[]}, claims, {"S1"})
+        self.assertEqual(duplicate.exception.code, "INCOMPLETE_CLAIM_COVERAGE")
 
 
 if __name__ == "__main__":

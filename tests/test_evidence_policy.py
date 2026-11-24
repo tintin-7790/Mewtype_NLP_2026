@@ -2,7 +2,7 @@ import unittest
 
 from src.evidence_policy import enforce_evidence_policy
 from src.protocol import Case, Source
-from src.validation import validate_record
+from src.validation import repair_evidence_numeric_support, validate_record
 
 
 def base_record(evidence):
@@ -45,6 +45,37 @@ class EvidencePolicyTests(unittest.TestCase):
         record = base_record([{"statement":"患者于2025.05就诊。", "source_ids":["S1"], "kind":"fact"}])
         errors = [issue for issue in validate_record(record, self.case) if issue["code"] == "NUMERIC_SUPPORT"]
         self.assertTrue(errors)
+
+    def test_bile_acid_values_are_exact_not_threshold_equivalent(self):
+        case = Case("P2", "T0", [Source("P0041", "总胆汁酸 14.2 μmol/L↑"),
+                                  Source("P0042", "总胆汁酸 11.8µmol/L↑")])
+        correct = base_record([{"statement":"总胆汁酸由14.2μmol/L降至11.8 μmol/L。",
+                                "source_ids":["P0041","P0042"], "kind":"fact"}])
+        self.assertFalse([x for x in validate_record(correct, case) if x["code"] == "NUMERIC_SUPPORT"])
+        wrong = base_record([{"statement":"总胆汁酸高于10μmol/L。",
+                              "source_ids":["P0041","P0042"], "kind":"inference"}])
+        errors = [x for x in validate_record(wrong, case) if x["code"] == "NUMERIC_SUPPORT"]
+        self.assertEqual(len(errors), 1)
+
+    def test_invalid_fact_number_is_repaired_only_with_exact_short_sources(self):
+        case = Case("P2", "T0", [Source("P0041", "总胆汁酸 14.2 μmol/L↑"),
+                                  Source("P0042", "总胆汁酸 11.8 μmol/L↑")])
+        wrong = base_record([{"statement":"总胆汁酸持续≥10μmol/L。",
+                              "source_ids":["P0041","P0042"], "kind":"fact"}])
+        repaired, audit = repair_evidence_numeric_support(wrong, case)
+        self.assertEqual(audit["repaired_count"], 1)
+        self.assertIn("14.2", repaired["evidence"][0]["statement"])
+        self.assertIn("11.8", repaired["evidence"][0]["statement"])
+        self.assertNotIn("10μmol", repaired["evidence"][0]["statement"])
+        self.assertFalse([x for x in validate_record(repaired, case) if x["code"] == "NUMERIC_SUPPORT"])
+
+    def test_medical_threshold_inference_is_not_silently_rewritten(self):
+        case = Case("P2", "T0", [Source("P0041", "总胆汁酸 14.2 μmol/L↑")])
+        wrong = base_record([{"statement":"诊断阈值为10μmol/L。",
+                              "source_ids":["P0041"], "kind":"inference"}])
+        repaired, audit = repair_evidence_numeric_support(wrong, case)
+        self.assertEqual(repaired, wrong)
+        self.assertEqual(audit["unresolved_count"], 1)
 
 
 if __name__ == "__main__":

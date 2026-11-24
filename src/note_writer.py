@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from .agent_orchestrator import attach_counter_review
 from .model_client import Budget, MEDICAL_SCHEMA, parse_model_json
 from .problem_context import build_problem_evidence_context
 from .prompt_profiles import load_clinical_prompt
@@ -12,7 +13,8 @@ from .protocol import Case
 
 def run_note_writer(case: Case, facts: list[dict], clinical_plan: dict, evidence_bundles: list[dict],
                     client, response_format: str, budget: Budget, evidence_limit: int,
-                    prompt_profile: str = "contrastive", prompt_audit: dict | None = None) -> dict:
+                    prompt_profile: str = "contrastive", prompt_audit: dict | None = None,
+                    counter_review: dict | None = None) -> dict:
     shared = {
         "record_cutoff": case.record_cutoff,
         "sources": [{"source_id": source.source_id, "field_path": source.field_path,
@@ -26,6 +28,7 @@ def run_note_writer(case: Case, facts: list[dict], clinical_plan: dict, evidence
                    "evidence_bundles": evidence_bundles}
     else:
         problem_context = build_problem_evidence_context(facts, clinical_plan, evidence_bundles)
+        attach_counter_review(problem_context, counter_review)
         payload = {**shared, "clinical_plan": clinical_plan,
                    "problem_evidence_context": problem_context}
     case_text = "\n".join(source.content for source in case.sources)

@@ -47,12 +47,17 @@ def run_planner(case: Case, facts: list[dict], client, response_format: str, bud
     raw = client.call(messages, response_format, budget, stage="planner", schema=PLANNER_SCHEMA)
     plan = parse_model_json(raw, stage="planner", client=client)
     fact_ids = {fact["fact_id"] for fact in facts}
-    validate_plan_fact_references(plan, fact_ids)
-    if prompt_profile != "legacy":
-        plan, policy = apply_contrastive_planning_policy(plan)
-        if prompt_audit is not None:
-            prompt_audit["planner"]["planning_policy"] = policy
-    validate_clinical_plan(plan, fact_ids)
+    try:
+        validate_plan_fact_references(plan, fact_ids)
+        if prompt_profile != "legacy":
+            plan, policy = apply_contrastive_planning_policy(plan)
+            if prompt_audit is not None:
+                prompt_audit["planner"]["planning_policy"] = policy
+        validate_clinical_plan(plan, fact_ids)
+    except CaseError as exc:
+        _record_schema(client, False, exc.code)
+        raise
+    _record_schema(client, True)
     return plan
 
 
@@ -228,3 +233,9 @@ def _contrastive_query(problem: dict, query: str, fact_map: dict[str, dict]) -> 
 def _messages(system: str, payload: dict) -> list[dict]:
     return [{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+
+def _record_schema(client, success: bool, error_type=None) -> None:
+    recorder = getattr(client, "record_schema_result", None)
+    if recorder is not None:
+        recorder("planner", success, error_type)

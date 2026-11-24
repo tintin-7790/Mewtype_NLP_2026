@@ -1,4 +1,7 @@
+import hashlib
 import re
+import unicodedata
+from copy import deepcopy
 
 from .errors import CaseError
 from .protocol import Case
@@ -41,12 +44,15 @@ def validate_record(record, case: Case) -> list[dict]:
 
 def _support_checks(statement: str, cited: str, index: int, kind: str | None) -> list[dict]:
     issues = []
-    normalized_statement = normalize_equivalent_dates(statement)
-    normalized_cited = normalize_equivalent_dates(cited)
+    normalized_statement = _normalize_measurements(normalize_equivalent_dates(statement))
+    normalized_cited = _normalize_measurements(normalize_equivalent_dates(cited))
     for match in NUMBER_WITH_CONTEXT.finditer(normalized_statement):
         token = match.group("num") + match.group("suffix").replace(" ", "")
         compact = normalized_cited.replace(" ", "")
-        if token not in compact and match.group("num") not in compact:
+        # A value with a unit must match that exact value/unit pair.  Falling
+        # back to the bare number can confuse thresholds, dates and other tests.
+        supported = token in compact if match.group("suffix").strip() else match.group("num") in compact
+        if not supported:
             issues.append(_issue("error", "NUMERIC_SUPPORT", f"evidence[{index}] 的数值/单位“{token}”未在引用来源中找到。"))
     if any(x in statement for x in ("否认", "未见", "无明显", "阴性")) and not any(x in cited for x in ("否认", "未见", "无明显", "阴性", "未闻及")):
         issues.append(_issue("warning", "NEGATION_SUPPORT", f"evidence[{index}] 的否定表述需人工复核。"))
@@ -56,6 +62,48 @@ def _support_checks(statement: str, cited: str, index: int, kind: str | None) ->
         issues.append(_issue("warning", "FACT_SUPPORT_LIMITED",
                              f"evidence[{index}] 与引用来源的字面重合较低，程序无法确认语义支持，需人工或模型核验。"))
     return issues
+
+
+def repair_evidence_numeric_support(record: dict, case: Case,
+                                    max_source_chars: int = 320) -> tuple[dict, dict]:
+    """Safely replace invalid fact evidence with its short, exact cited text.
+
+    No numeric value is guessed or mapped to a nearby value. Inference evidence
+    and long/multi-purpose sources are left unresolved so final validation can
+    fail explicitly instead of manufacturing provenance.
+    """
+    result = deepcopy(record)
+    known = {source.source_id: source.content for source in case.sources}
+    repaired = []
+    unresolved = []
+    for index, item in enumerate(result.get("evidence", []) if isinstance(result, dict) else []):
+        if not isinstance(item, dict) or not isinstance(item.get("statement"), str):
+            continue
+        ids = item.get("source_ids")
+        if not isinstance(ids, list) or not ids or any(source_id not in known for source_id in ids):
+            continue
+        cited = "\n".join(known[source_id] for source_id in ids)
+        numeric = [issue for issue in _support_checks(item["statement"], cited, index, item.get("kind"))
+                   if issue["code"] == "NUMERIC_SUPPORT"]
+        if not numeric:
+            continue
+        exact = "；".join(known[source_id].strip() for source_id in ids)
+        can_repair = item.get("kind") == "fact" and 0 < len(exact) <= max_source_chars
+        if can_repair:
+            remaining = [issue for issue in _support_checks(exact, cited, index, "fact")
+                         if issue["code"] == "NUMERIC_SUPPORT"]
+            if not remaining:
+                before = item["statement"]
+                item["statement"] = exact
+                repaired.append({"evidence_index": index, "strategy": "exact_cited_source",
+                                 "source_ids": list(ids),
+                                 "before_sha256": hashlib.sha256(before.encode()).hexdigest(),
+                                 "after_sha256": hashlib.sha256(exact.encode()).hexdigest()})
+                continue
+        unresolved.append({"evidence_index": index, "code": "NUMERIC_SUPPORT",
+                           "kind": item.get("kind"), "source_ids": list(ids)})
+    return result, {"repaired_count": len(repaired), "unresolved_count": len(unresolved),
+                    "repairs": repaired, "unresolved": unresolved}
 
 
 def normalize_equivalent_dates(value: str) -> str:
@@ -69,6 +117,12 @@ def normalize_equivalent_dates(value: str) -> str:
                         lambda match: f"{match.group(1)}年{int(match.group(2))}月" +
                         (f"{int(match.group(3))}日" if match.group(3) else ""), normalized)
     return normalized
+
+
+def _normalize_measurements(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return (normalized.replace("µ", "μ").replace("\u00a0", " ")
+            .replace("−", "-").replace("‑", "-").replace("–", "-").replace("—", "-"))
 
 
 def _has_lexical_support(statement: str, cited: str) -> bool:

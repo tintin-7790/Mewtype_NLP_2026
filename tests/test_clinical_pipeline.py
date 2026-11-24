@@ -25,20 +25,11 @@ def draft(plan="当前治疗情况未提供，建议由医生结合病情决定�
 
 
 def claims(with_issue=False):
-    values = [
-        {"claim_id":"C001","verdict":"SUPPORTED","rationale":"原文支持","source_ids":["S1"]},
-        {"claim_id":"C002","verdict":"GROUNDED","rationale":"原文支持不确定表述","source_ids":["S1"]},
-        {"claim_id":"C003","verdict":"NOT_ADDRESSED",
-         "rationale":"当前治疗状态未提供，后续建议需保守","source_ids":["S1"]},
-        {"claim_id":"C004","verdict":"SUPPORTED","rationale":"原文支持","source_ids":["S1"]},
-        {"claim_id":"C005","verdict":"SUPPORTED","rationale":"原文确实未提供","source_ids":["S1"]},
-    ]
     issues = []
     if with_issue:
-        issues = [{"claim_id":"C003","section":"plan","statement":"当前尚未开始抗感染治疗。",
-                   "error_type":"NOT_ADDRESSED","severity":"high",
-                   "revision_hint":"改为当前治疗情况未提供。","source_ids":[]}]
-    return {"claims": values, "issues": issues}
+        issues = [{"claim_id":"C003","code":"UNSUPPORTED_NEGATIVE","severity":"high",
+                   "hint":"改为当前治疗情况未提供。","source_ids":[]}]
+    return {"checked_claim_ids":["C001","C002","C003","C004","C005"], "issues":issues}
 
 
 class ClinicalPipelineTests(unittest.TestCase):
@@ -115,9 +106,9 @@ class ClinicalPipelineTests(unittest.TestCase):
 
     def test_fourth_call_revises_only_plan(self):
         bad=draft("当前尚未开始抗感染治疗。")
-        revised=draft()["evidence"]
-        revision={"section_updates":{"plan":"当前治疗情况未提供，后续治疗需由医生结合病情决定。"},
-                  "evidence":revised,"review_items":["当前治疗情况需确认。"]}
+        revision={"edits":[{"claim_id":"C003","section":"plan","action":"replace",
+                             "replacement":"当前治疗情况未提供，后续治疗需由医生结合病情决定。"}],
+                  "review_items_to_add":[]}
         code,output,log=self.run_pipeline([planner(),bad,claims(True),revision],
             ["--clinical-verification","on","--clinical-revision","on"])
         result=output[0]["medical_record"]
@@ -133,24 +124,28 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
         self.assertEqual(log["cases"][0]["calls"],3)
         self.assertNotIn("尚未开始抗感染治疗", output[0]["medical_record"]["plan"])
-        self.assertEqual(log["cases"][0]["clinical"]["verification_status"],"fallback_disclosed")
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["verification_status"],"completed_deterministic_fallback")
+        self.assertFalse(clinical["revision_applied"])
+        self.assertTrue(clinical["deterministic_fallback_applied"])
 
     def test_verifier_extra_data_preserves_legal_writer_draft(self):
         script=self.root/"malformed.json"; output=self.root/"malformed-output.json"; log_path=self.root/"malformed-log.json"
         script.write_text(json.dumps([
             {"content":json.dumps(planner(),ensure_ascii=False)},
             {"content":json.dumps(draft(),ensure_ascii=False)},
-            {"content":'{"claims":[],"issues":[]}\n额外说明'},
+            {"content":'{"checked_claim_ids":[],"issues":[]}\n额外说明'},
         ], ensure_ascii=False), encoding="utf-8")
         code=main(["--input",str(self.input),"--output",str(output),"--log",str(log_path),
                    "--mode","mock","--mock-responses",str(script),"--pipeline","clinical_pipeline"])
         saved_output=json.loads(output.read_text()); saved_log=json.loads(log_path.read_text())
         self.assertEqual(code,0); self.assertEqual(saved_output[0]["status"],"success")
         self.assertEqual(saved_output[0]["medical_record"]["case_features"], draft()["case_features"])
-        self.assertTrue(any("自动核验未完成" in item
-                            for item in saved_output[0]["medical_record"]["review_items"]))
+        self.assertFalse(any("自动核验" in item
+                             for item in saved_output[0]["medical_record"]["review_items"]))
         clinical=saved_log["cases"][0]["clinical"]
         self.assertEqual(clinical["verification_status"],"incomplete_writer_preserved")
+        self.assertFalse(clinical["verification_completed"])
         self.assertEqual(clinical["verification_error"]["code"],"MODEL_INVALID_JSON")
         event=saved_log["cases"][0]["stage_calls"][2]
         self.assertEqual(event["stage"],"verifier"); self.assertFalse(event["json_parse_success"])
@@ -158,7 +153,9 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertIsInstance(event["parse_error_position"],int)
 
     def test_invalid_verifier_verdict_preserves_writer_draft(self):
-        verdict=claims(); verdict["claims"][0]["verdict"]="GROUNDED"
+        verdict=claims(); verdict["issues"]=[{
+            "claim_id":"C001","code":"NOT_A_REAL_CODE","severity":"high",
+            "hint":"非法错误码。","source_ids":["S1"]}]
         code,output,log=self.run_pipeline([planner(),draft(),verdict],
             ["--clinical-verification","on","--clinical-revision","on"])
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
@@ -174,8 +171,42 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
         self.assertNotIn("尚未开始抗感染治疗",output[0]["medical_record"]["plan"])
         clinical=log["cases"][0]["clinical"]
-        self.assertEqual(clinical["verification_status"],"fallback_disclosed")
+        self.assertEqual(clinical["verification_status"],"completed_deterministic_fallback")
+        self.assertTrue(clinical["deterministic_fallback_applied"])
         self.assertEqual(clinical["revision"]["model_revision_error"]["code"],"INVALID_LOCAL_REVISION")
+
+    def test_safe_non_edit_is_logged_as_unresolved_not_model_revision(self):
+        verdict=claims(); verdict["issues"]=[{
+            "claim_id":"C003","code":"UNSAFE_RECOMMENDATION","severity":"high",
+            "hint":"无法自动安全修订，需医生判断。","source_ids":[]}]
+        no_edit={"edits":[], "review_items_to_add":["后续治疗方案需医生结合病情确认。"]}
+        code,output,log=self.run_pipeline([planner(),draft(),verdict,no_edit],
+            ["--clinical-verification","on","--clinical-revision","on"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["verification_status"],"completed_revision_unresolved")
+        self.assertFalse(clinical["revision_applied"])
+        self.assertEqual(clinical["unresolved_claim_ids"],["C003"])
+
+    def test_reviser_cannot_introduce_unsupported_evidence_number(self):
+        self.input.write_text(json.dumps([{"case_id":"C1","record_cutoff":"T0","sources":[
+            {"source_id":"S1","content":"总胆汁酸14.2μmol/L。"}]}],ensure_ascii=False),encoding="utf-8")
+        good={"case_features":"患者总胆汁酸升高。","diagnostic_discussion":"病因待查。",
+              "plan":"建议结合病情复查。","evidence":[{"statement":"总胆汁酸14.2μmol/L。",
+              "source_ids":["S1"],"kind":"fact"}],"review_items":[]}
+        verdict={"checked_claim_ids":["C001","C002","C003","C004"],"issues":[{
+            "claim_id":"C004","code":"NUMERIC_VALUE_ERROR","severity":"high",
+            "hint":"核对患者检查数值。","source_ids":["S1"]}]}
+        bad_patch={"edits":[{"claim_id":"C004","section":"evidence","action":"replace",
+                              "replacement":"总胆汁酸10μmol/L。"}],"review_items_to_add":[]}
+        code,output,log=self.run_pipeline([planner(),good,verdict,bad_patch],
+            ["--clinical-verification","on","--clinical-revision","on"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        self.assertFalse(any("10μmol/L" in item["statement"]
+                             for item in output[0]["medical_record"]["evidence"]))
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["revision_error"]["code"],"LOCAL_REVISION_VALIDATION_FAILED")
+        self.assertTrue(clinical["deterministic_fallback_applied"])
 
     def test_invalid_contrastive_plan_uses_baseline_fallback_and_logs_mode(self):
         invalid={"problems":[]}
@@ -216,9 +247,8 @@ class ClinicalPipelineTests(unittest.TestCase):
 
     def test_low_issue_does_not_trigger_revision_call(self):
         verdict=claims(); verdict["issues"]=[{
-            "claim_id":"C003","section":"plan","statement":draft()["plan"],
-            "error_type":"STYLE_REDUNDANCY","severity":"low",
-            "revision_hint":"可精简但不影响临床意义。","source_ids":[]}]
+            "claim_id":"C003","code":"PLAN_ALIGNMENT_WEAK","severity":"low",
+            "hint":"可精简但不影响临床意义。","source_ids":[]}]
         code,output,log=self.run_pipeline([planner(),draft(),verdict],
             ["--clinical-verification","on","--clinical-revision","on"])
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
@@ -227,9 +257,8 @@ class ClinicalPipelineTests(unittest.TestCase):
 
     def test_medium_issue_becomes_review_without_revision_or_failure(self):
         verdict=claims(); verdict["issues"]=[{
-            "claim_id":"C003","section":"plan","statement":draft()["plan"],
-            "error_type":"PLAN_NEEDS_INDIVIDUALIZATION","severity":"medium",
-            "revision_hint":"需结合个体情况由医生确认。","source_ids":[]}]
+            "claim_id":"C003","code":"PLAN_ALIGNMENT_WEAK","severity":"medium",
+            "hint":"需结合个体情况由医生确认。","source_ids":[]}]
         code,output,log=self.run_pipeline([planner(),draft(),verdict],
             ["--clinical-verification","on","--clinical-revision","on"])
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
@@ -238,7 +267,9 @@ class ClinicalPipelineTests(unittest.TestCase):
                             for item in output[0]["medical_record"]["review_items"]))
 
     def test_unreferenced_grounded_reasoning_is_downgraded_without_case_failure(self):
-        verdict=claims(); verdict["claims"][1]["source_ids"]=[]
+        verdict=claims(); verdict["issues"]=[{
+            "claim_id":"C002","code":"UNREFERENCED_INFERENCE","severity":"medium",
+            "hint":"临床推断需由医生结合原始资料确认。","source_ids":[]}]
         code,output,log=self.run_pipeline([planner(),draft(),verdict],
             ["--clinical-verification","on","--clinical-revision","on"])
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")

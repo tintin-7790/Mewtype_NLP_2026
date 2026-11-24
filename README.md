@@ -1,6 +1,6 @@
 # 循证智录：首次病程记录生成程序
 
-本项目面向教学比赛，不用于真实诊疗。当前版本 `0.4.3` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供对比式临床规划、问题条件化证据写作、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订；正式 Schema、赛方模型参数和资源配额尚待公布。
+本项目面向教学比赛，不用于真实诊疗。当前研究版本 `0.4.4-research` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供对比式临床规划、问题条件化证据写作、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订，并加入默认关闭的轻量临床图重排与一次性反证代理；正式 Schema、赛方模型参数和资源配额尚待公布。
 
 ## 运行
 
@@ -78,7 +78,7 @@ python tools/adapt_practice.py --input practice.json --output adapted.json \
 
 - `baseline`：原始资料 → 一次模型生成 → 格式/来源/有限事实检查 → 输出。
 - `evidence_pipeline`：原始资料 → 事实整理 → 原文+事实约束生成 → 独立核验 → 输出。
-- `clinical_pipeline`：确定性事实编号 → 临床问题规划 → 可选问题级 Dense 检索 → 证据约束写作 → 可选原子事实核验 → 必要时最多一次局部修订 → 确定性复核 → 输出。
+- `clinical_pipeline`：确定性事实编号 → 临床问题规划 → 可选病例内图重排/一次性反证审查 → 证据约束写作 → 可选原子事实核验 → 必要时最多一次局部修订 → 确定性复核 → 输出。
 
 事实结构分别表达原文、来源、字段路径、事实内容、时间、数值、单位、肯定/否定/不确定/未提供、完成/进行中/计划及更正关系。原始 sources 始终随生成和核验传入，事实表不是唯一输入。该流程尚未通过同条件医学实验，不能宣称优于 baseline。
 
@@ -106,7 +106,35 @@ python3 main.py --input input.json --output output.json \
 
 三组 A/B/C 的冻结条件、标注与指标定义见 `docs/retrieval_experiment.md`。
 
-### Clinical Pipeline v0.4.3
+### 可选 Graph-Guided Retrieval 与反证代理
+
+两项研究功能均默认关闭，Baseline 不经过这些代码。`--graph-retrieval one_hop|ppr` 在当前病例内构建 Source、Fact、时间、临床问题、鉴别与计划目标的异构图，并对已有 Dense 候选重排；它必须同时提供 `--retrieval-config`。图分数不会自动覆盖最终 `source_ids`，现有数值、否定、时间和状态检查保持启用。
+
+`--clinical-agents adaptive` 只在透明复杂度评分达到阈值时增加一次反证审查；`always` 仅用于对照。代理使用紧凑协议：`reviewed_problem_ids` 必须完整覆盖 Planner 问题，`issues` 只返回高价值反证、方向含混 Fact、关键缺失或确定性过强，不再逐问题输出长篇 summary。输入使用带 source_id 的原文 Fact 片段和精简问题视图，不重复整份 sources/plan。代理不修改 Facts/Plan；截断或 Schema 失败会记录 `completed=false`、finish reason 和覆盖错误后回到 Writer，不进入自由讨论循环。启用任一代理模式时，每例调用预算会预留一次额外调用。
+
+离线查看现有转换病例的 Facts 和图结构（不调用 Qwen/BGE）：
+
+```bash
+python3.11 tools/inspect_clinical_graph.py \
+  --input information/converted/01_input.json \
+  --output /tmp/practice01_graph_audit.json
+```
+
+使用本地/获准 embedding 做一跳图重排并按复杂度触发反证代理：
+
+```bash
+python3.11 main.py --input information/converted/01_input.json \
+  --output graph_agent_output.json --log graph_agent_run_log.json \
+  --mode dev_api --pipeline clinical_pipeline \
+  --clinical-verification off --clinical-revision off \
+  --retrieval-config config/retrieval.local.json \
+  --graph-retrieval one_hop --clinical-agents adaptive \
+  --clinical-response-format json_schema
+```
+
+若 `config/retrieval.local.json` 指向本地 BGE，开发机必须已具备依赖和权重；程序不会下载。若只想验证控制流，可用 `provider=mock`，但其哈希向量不代表 BGE 语义效果。算法依据、固定评分、Agent Schema、成本和实验矩阵见 `docs/graph_rag_multi_agent_design.md`。
+
+### Clinical Pipeline v0.4.4-research
 
 Clinical Planner 先输出内部问题表，包括优先级、来源属性、支持/反对事实、鉴别诊断、区分所需资料、计划目标和检索查询。提示词要求每个主要问题优先保留2–3个有依据的鉴别方向；只有原始资料明确否定或确有不支持事实时才列为反对证据。所有事实使用程序确定生成的 `F001...`，不存在的事实引用会使单例失败。初步诊断必须标记为 `documented_problem` 或 `mixed`，不能直接视为已证实结论。
 
@@ -118,7 +146,9 @@ Planner 后由 Python 构建 `problem_evidence_context`，确定性地解析 Fac
 
 `--clinical-prompt-profile` 支持三档；正常有效规划不会增加调用次数：`legacy` 使用归档 v0.4 提示词；`contrastive` 是默认的强化规划/写作；`contrastive_fewshot` 从合成示例库按病例关键词为 Planner 和 Writer 各选择最多一个示例。有限回退只在规划结果无效且预算足够时使用已有病例调用预算。日志记录 profile、实际算法模式、示例 ID、规范化摘要及每阶段输入字符数。Few-shot 仅用于实验，不代表质量已经提升。
 
-Writer 之后，程序对五个输出部分拆分原子陈述。确定性规则先检查未知写成否定、频次缺失、事实反转、诊断确定程度、更正、时间和计划状态；可选 Qwen Verifier 再批量返回逐 claim verdict 与结构化问题。HIGH 优先触发第四次局部修订；MEDIUM 不使整例失败，进入待核事项；LOW 不触发额外调用。无来源的 GROUNDED/PARTIALLY_GROUNDED 推断不会伪造来源，而会降级为 REQUIRES_CLINICIAN_REVIEW。若修订未启用、预算不足或修订响应无效，程序对已精确定位的 HIGH 陈述进行保守替换并在 review_items 披露，内部标记 `fallback_disclosed`，不伪装为完全核验通过。未定位字段保持不变；修订最多一轮，之后重新执行确定性规则和原有 validation。
+Writer 之后，程序对五个输出部分拆分可定位的原子陈述，并为正文记录字符区间、为 evidence/review_items 记录项目下标。确定性规则先检查未知写成否定、频次缺失、事实反转、诊断确定程度、更正、时间和计划状态；可选 Qwen Verifier 使用紧凑协议，只返回完整的 `checked_claim_ids` 和真正需要关注的 `issues`，不再为每条正确 Claim 重复 verdict/rationale。程序要求 checked ID 无重复且完整覆盖全部 Claim，否则明确记录 `INCOMPLETE_CLAIM_COVERAGE`，绝不把未提及视为通过。
+
+HIGH issue 按 Claim ID 合并成唯一 Patch 目标后，才可能触发第四次 Local Reviser；MEDIUM 不使整例失败，进入待核事项；LOW 不触发额外调用。Reviser 只能返回 `replace/remove` Claim Patch 和临床待核事项，不能重写整个字段；程序使用字符区间或列表下标精确应用、验证结构和来源，并重新执行确定性高风险检查。若修订未启用或模型修订失败，确定性保守替换会单独标记为 `deterministic_fallback_applied`，不会把 `revision_applied` 伪装为模型修订成功。模型/JSON/API 错误只进入运行日志，禁止写入面向医生的 review_items。详细设计与旧 D 实测诊断见 `docs/clinical_verifier_revision_optimization.md`。
 
 消融运行方式：
 
@@ -145,7 +175,7 @@ python3.11 main.py --input input.json --output e.json --mode dev_api \
   --retrieval-config config/retrieval.local.json
 ```
 
-不提供 `--retrieval-config` 时 B/D/E 均可运行，用于检索消融。Planner、Medical Record、Verification 和 Revision 分别使用 `PLANNER_SCHEMA`、`MEDICAL_SCHEMA`、`VERIFIER_SCHEMA` 和 `REVISER_SCHEMA`，解析后仍执行程序侧字段、枚举和引用校验。默认继续采用配置中的格式；可用 `--clinical-response-format json_schema` 显式要求所有阶段使用各自 Schema，也可通过 `--planner-response-format`、`--writer-response-format`、`--verifier-response-format`、`--reviser-response-format` 单独覆盖为 `text/json_object/json_schema`。服务不支持时直接报告 `RESPONSE_FORMAT_REJECTED`，不会自动假装支持；仅配置文件中显式声明的 fallback 才可能增加调用。competition 配置的 `max_calls_per_case` 必须覆盖所选消融的2/3/4次预算，且不能因百炼支持而假定赛方内网支持。
+不提供 `--retrieval-config` 时 B/D/E 均可运行，用于检索消融。Planner、Counter Evidence、Medical Record、Verification 和 Revision 分别使用 `PLANNER_SCHEMA`、`COUNTER_EVIDENCE_SCHEMA`、`MEDICAL_SCHEMA`、`VERIFIER_SCHEMA` 和 `REVISER_SCHEMA`，解析后仍执行程序侧字段、枚举和引用校验。默认继续采用配置中的格式；可用 `--clinical-response-format json_schema` 显式要求所有阶段使用各自 Schema，也可通过 `--planner-response-format`、`--counter-evidence-response-format`、`--writer-response-format`、`--verifier-response-format`、`--reviser-response-format` 单独覆盖为 `text/json_object/json_schema`。服务不支持时直接报告 `RESPONSE_FORMAT_REJECTED`，不会自动假装支持；仅配置文件中显式声明的 fallback 才可能增加调用。competition 配置的 `max_calls_per_case` 必须覆盖所选消融的2/3/4次预算，启用反证代理再增加1次，且不能因百炼支持而假定赛方内网支持。
 
 虚构 `TEST001` 的分阶段结构化输出调试示例：
 
@@ -167,7 +197,7 @@ python3.11 main.py --input test_input.json --output clinical_output.json \
 
 ## 校验能力边界
 
-程序分开检查结构、来源编号、引用中数值/单位的存在性、日期等价格式、否定支持和“计划写成已完成”等风险。`2026.05` 与 `2026年5月` 可规范为同一月份，但不同年份或月份仍报告冲突。数值检查绑定 evidence 陈述与其引用来源，不用全文数字集合冒充医学核验；规则仍无法判断所有语义支持、临床合理性和隐含时序，风险项需要人工或专业审核。修订幅度日志仅记录字段、长度、字符变化估计、SequenceMatcher 相似度和文本哈希，不在普通日志复制完整病例。
+程序分开检查结构、来源编号、引用中数值/单位的存在性、日期等价格式、否定支持和“计划写成已完成”等风险。`2026.05` 与 `2026年5月` 可规范为同一月份，但不同年份或月份仍报告冲突；空格、`μ/µ` 和常见 Unicode 连字符会规范化，而 `10`、`11.8`、`14.2` 绝不视为等价。数值检查绑定 evidence 陈述与其引用来源，不用全文数字集合冒充医学核验。若 kind=fact 的短来源 Evidence 含不支持数值，程序只允许用所引短来源原文做一次确定性替换；推断阈值或无法唯一确认的数值保持错误并使最终验证失败。Writer 后和最终输出前分别记录 Evidence 校验/修复摘要。规则仍无法判断所有语义支持、临床合理性和隐含时序，风险项需要人工或专业审核。修订幅度日志仅记录字段、长度、字符变化估计、SequenceMatcher 相似度和文本哈希，不在普通日志复制完整病例。
 
 ## 日志与复现
 
@@ -177,7 +207,7 @@ python3.11 main.py --input test_input.json --output clinical_output.json \
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 tools/build_package.py --team 团队名称 --version v0.4.3
+python3 tools/build_package.py --team 团队名称 --version v0.4.4-research
 ```
 
 打包脚本生成一层团队目录，仅包含运行文件、源码、提示词和资源清单，排除 `information/`、配置、凭据、缓存、虚拟环境、测试输出和本地模型。

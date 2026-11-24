@@ -6,7 +6,9 @@ from pathlib import Path
 INCLUDE = ["main.py", "requirements.txt", "README.md", "resource_manifest.json", "src", "prompts",
            "config/competition.example.json", "config/local.mlx.example.json", "tools/adapt_practice.py",
            "config/retrieval.local.example.json", "tools/eval_clinical_pipeline.py",
-           "docs/clinical_experiment.md", "docs/algorithm_optimization_v043.md"]
+           "tools/inspect_clinical_graph.py", "docs/clinical_experiment.md",
+           "docs/algorithm_optimization_v043.md", "docs/graph_rag_multi_agent_design.md",
+           "docs/clinical_verifier_revision_optimization.md", "docs/d_agent_failure_repair.md"]
 
 
 def main():

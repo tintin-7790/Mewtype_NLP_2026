@@ -55,40 +55,61 @@ PLANNER_SCHEMA = {"name": "clinical_plan", "strict": True, "schema": {
             "retrieval_queries": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         }}}}}}
 
-_VERIFIER_CLAIM = {"type": "object", "additionalProperties": False,
-    "required": ["claim_id", "verdict", "rationale", "source_ids"], "properties": {
-        "claim_id": {"type": "string", "minLength": 1},
-        "verdict": {"type": "string", "enum": ["SUPPORTED", "REFUTED", "NOT_ADDRESSED", "GROUNDED",
-                                                     "PARTIALLY_GROUNDED", "INSUFFICIENT_EVIDENCE",
-                                                     "REQUIRES_CLINICIAN_REVIEW"]},
-        "rationale": {"type": "string"},
-        "source_ids": {"type": "array", "items": {"type": "string"}},
-    }}
+COUNTER_EVIDENCE_CODES = [
+    "COUNTER_EVIDENCE", "AMBIGUOUS_FACT_DIRECTION",
+    "MISSING_DISCRIMINATING_EVIDENCE", "OVERSTATED_CERTAINTY",
+]
+COUNTER_EVIDENCE_SCHEMA = {"name": "compact_counter_evidence_review", "strict": True, "schema": {
+    "type": "object", "additionalProperties": False,
+    "required": ["reviewed_problem_ids", "issues"],
+    "properties": {
+        "reviewed_problem_ids": {"type": "array", "items": {"type": "string"}},
+        "issues": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["problem_id", "code", "fact_ids", "note"],
+            "properties": {
+                "problem_id": {"type": "string", "minLength": 1},
+                "code": {"type": "string", "enum": COUNTER_EVIDENCE_CODES},
+                "fact_ids": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string", "minLength": 1},
+            }},
+        },
+    }}}
+
+VERIFIER_ISSUE_CODES = [
+    "PATIENT_FACT_CONTRADICTION", "NUMERIC_VALUE_ERROR", "UNIT_ERROR",
+    "TEMPORAL_CONFLICT", "CORRECTION_IGNORED", "UNSUPPORTED_NEGATIVE",
+    "PLAN_AS_COMPLETED", "RESULT_AS_AVAILABLE", "DIAGNOSIS_CERTAINTY_UPGRADE",
+    "INFERENCE_UNDER_SUPPORTED", "IMPORTANT_EVIDENCE_OMITTED", "PLAN_ALIGNMENT_WEAK",
+    "UNREFERENCED_INFERENCE", "UNSAFE_RECOMMENDATION", "SOURCE_MISMATCH",
+]
 _VERIFIER_ISSUE = {"type": "object", "additionalProperties": False,
-    "required": ["claim_id", "section", "statement", "error_type", "severity", "revision_hint", "source_ids"],
+    "required": ["claim_id", "code", "severity", "hint", "source_ids"],
     "properties": {
         "claim_id": {"type": "string", "minLength": 1},
-        "section": {"type": "string", "enum": ["case_features", "diagnostic_discussion", "plan",
-                                                   "evidence", "review_items"]},
-        "statement": {"type": "string"}, "error_type": {"type": "string"},
+        "code": {"type": "string", "enum": VERIFIER_ISSUE_CODES},
         "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-        "revision_hint": {"type": "string"},
+        "hint": {"type": "string", "minLength": 1},
         "source_ids": {"type": "array", "items": {"type": "string"}},
     }}
 VERIFIER_SCHEMA = {"name": "claim_verification", "strict": True, "schema": {
-    "type": "object", "additionalProperties": False, "required": ["claims", "issues"],
-    "properties": {"claims": {"type": "array", "items": _VERIFIER_CLAIM},
+    "type": "object", "additionalProperties": False, "required": ["checked_claim_ids", "issues"],
+    "properties": {"checked_claim_ids": {"type": "array", "items": {"type": "string"}},
                    "issues": {"type": "array", "items": _VERIFIER_ISSUE}}}}
 
-REVISER_SCHEMA = {"name": "localized_revision", "strict": True, "schema": {
+REVISER_SCHEMA = {"name": "localized_claim_patch", "strict": True, "schema": {
     "type": "object", "additionalProperties": False,
-    "required": ["section_updates", "evidence", "review_items"],
+    "required": ["edits", "review_items_to_add"],
     "properties": {
-        "section_updates": {"type": "object", "additionalProperties": False,
-                            "properties": {key: {"type": "string", "minLength": 1}
-                                           for key in ("case_features", "diagnostic_discussion", "plan")}},
-        "evidence": MEDICAL_SCHEMA["schema"]["properties"]["evidence"],
-        "review_items": MEDICAL_SCHEMA["schema"]["properties"]["review_items"],
+        "edits": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["claim_id", "section", "action", "replacement"], "properties": {
+                "claim_id": {"type": "string", "minLength": 1},
+                "section": {"type": "string", "enum": ["case_features", "diagnostic_discussion", "plan",
+                                                           "evidence", "review_items"]},
+                "action": {"type": "string", "enum": ["replace", "remove"]},
+                "replacement": {"type": "string"},
+            }}},
+        "review_items_to_add": {"type": "array", "items": {"type": "string"}},
     }}}
 
 
@@ -115,16 +136,25 @@ class MockClient:
             self._event(stage, response_format, False, "MODEL_TIMEOUT", prompt_metrics); raise CaseError("MODEL_TIMEOUT", "mock 超时。")
         if entry.get("exception"):
             self._event(stage, response_format, False, "MODEL_ERROR", prompt_metrics); raise CaseError("MODEL_ERROR", str(entry["exception"]))
-        self._event(stage, response_format, True, None, prompt_metrics)
+        usage = _safe_usage(entry.get("usage"))
+        for key in self.total_usage:
+            self.total_usage[key] += usage[key]
+        self._event(stage, response_format, True, None, prompt_metrics,
+                    entry.get("finish_reason"), usage, entry.get("max_tokens"))
         return entry.get("content", "")
-    def _event(self, stage, response_format, success, error_type, prompt_metrics):
+    def _event(self, stage, response_format, success, error_type, prompt_metrics,
+               finish_reason=None, usage=None, max_tokens=None):
         self.call_events.append({"stage": stage, "model": "mock", "response_format": response_format,
                                  "call_success": success, "json_parse_success": None,
                                  "parse_error_type": None, "parse_error_position": None,
-                                 "token_usage": _empty_usage(), "elapsed_ms": 0.0,
-                                 "call_error_type": error_type, **prompt_metrics})
+                                 "schema_validation_success": None, "schema_error_type": None,
+                                 "token_usage": usage or _empty_usage(), "elapsed_ms": 0.0,
+                                 "call_error_type": error_type, "finish_reason": finish_reason,
+                                 "max_tokens": max_tokens, **prompt_metrics})
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
+    def record_schema_result(self, stage, success, error_type=None):
+        _update_schema_event(self.call_events, stage, success, error_type)
 
 
 class ChatCompletionsClient:
@@ -158,9 +188,10 @@ class ChatCompletionsClient:
                     payload = json.loads(response.read().decode("utf-8"))
                 self._record_usage(payload.get("usage"))
                 content = payload["choices"][0]["message"]["content"]
+                finish_reason = payload["choices"][0].get("finish_reason")
                 self.last_response_format = fmt
                 self._record_call_event(stage, fmt, True, payload.get("usage"), request_started,
-                                        prompt_metrics=prompt_metrics)
+                                        prompt_metrics=prompt_metrics, finish_reason=finish_reason)
                 self._debug({"event": "response", "model": self.config.model,
                              "stage": stage, "requested_response_format": fmt, "content": content,
                              "usage": payload.get("usage", {})})
@@ -184,16 +215,22 @@ class ChatCompletionsClient:
                     code = "MODEL_TIMEOUT" if isinstance(exc, (socket.timeout, TimeoutError)) else "MODEL_ERROR"
                     raise CaseError(code, f"模型接口失败：{type(exc).__name__}") from exc
 
-    def _record_call_event(self, stage, fmt, success, usage, started, error_type=None, prompt_metrics=None):
+    def _record_call_event(self, stage, fmt, success, usage, started, error_type=None,
+                           prompt_metrics=None, finish_reason=None):
         self.call_events.append({"stage": stage, "model": self.config.model, "response_format": fmt,
                                  "call_success": success, "json_parse_success": None,
                                  "parse_error_type": None, "parse_error_position": None,
+                                 "schema_validation_success": None, "schema_error_type": None,
                                  "token_usage": _safe_usage(usage),
                                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-                                 "call_error_type": error_type, **(prompt_metrics or {})})
+                                 "call_error_type": error_type, "finish_reason": finish_reason,
+                                 "max_tokens": self.config.max_tokens, **(prompt_metrics or {})})
 
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
+
+    def record_schema_result(self, stage, success, error_type=None):
+        _update_schema_event(self.call_events, stage, success, error_type)
 
     def _headers(self):
         return {"Content-Type": "application/json"}
@@ -251,13 +288,18 @@ class MlxDirectClient:
             self.call_events.append({"stage": stage, "model": self.config.model, "response_format": response_format,
                                      "call_success": True, "json_parse_success": None,
                                      "parse_error_type": None, "parse_error_position": None,
-                                     "token_usage": _empty_usage(), "elapsed_ms": 0.0, "call_error_type": None})
+                                     "schema_validation_success": None, "schema_error_type": None,
+                                     "token_usage": _empty_usage(), "elapsed_ms": 0.0, "call_error_type": None,
+                                     "finish_reason": None, "max_tokens": self.config.max_tokens})
             self.call_events[-1].update(prompt_metrics)
             return result
         except Exception as exc:
             raise CaseError("LOCAL_MODEL_ERROR", f"本地 MLX 推理失败：{type(exc).__name__}") from exc
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
+
+    def record_schema_result(self, stage, success, error_type=None):
+        _update_schema_event(self.call_events, stage, success, error_type)
 
 
 _COMPLETE_JSON_FENCE = re.compile(r"\A```(?:json)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```[ \t]*\Z", re.IGNORECASE)
@@ -335,6 +377,14 @@ def _update_parse_event(events, stage, success, error_type, position):
             event["json_parse_success"] = success
             event["parse_error_type"] = error_type
             event["parse_error_position"] = position
+            return
+
+
+def _update_schema_event(events, stage, success, error_type):
+    for event in reversed(events):
+        if event.get("stage") == stage and event.get("call_success"):
+            event["schema_validation_success"] = success
+            event["schema_error_type"] = error_type
             return
 
 

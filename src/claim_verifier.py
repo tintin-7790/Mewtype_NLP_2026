@@ -7,14 +7,16 @@ import re
 from pathlib import Path
 
 from .errors import CaseError
-from .model_client import Budget, VERIFIER_SCHEMA, parse_model_json
+from .model_client import Budget, VERIFIER_ISSUE_CODES, VERIFIER_SCHEMA, parse_model_json
 from .protocol import Case
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-FACT_VERDICTS = {"SUPPORTED", "REFUTED", "NOT_ADDRESSED"}
-REASONING_VERDICTS = {"GROUNDED", "PARTIALLY_GROUNDED", "INSUFFICIENT_EVIDENCE", "REQUIRES_CLINICIAN_REVIEW"}
-SECTIONS = {"case_features", "diagnostic_discussion", "plan", "evidence", "review_items"}
+HARD_ERROR_CODES = {
+    "PATIENT_FACT_CONTRADICTION", "NUMERIC_VALUE_ERROR", "UNIT_ERROR", "TEMPORAL_CONFLICT",
+    "CORRECTION_IGNORED", "UNSUPPORTED_NEGATIVE", "PLAN_AS_COMPLETED", "RESULT_AS_AVAILABLE",
+    "DIAGNOSIS_CERTAINTY_UPGRADE", "SOURCE_MISMATCH",
+}
 
 
 def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_plan: dict,
@@ -24,86 +26,86 @@ def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_pl
     candidates = []
     if retriever is not None:
         for claim in claims:
+            retrieved = [candidate.to_dict() for candidate in
+                         retriever.retrieve(claim["statement"], top_k=retrieval_top_k)]
             candidates.append({
                 "claim_id": claim["claim_id"],
-                "candidates": [candidate.to_dict() for candidate in
-                               retriever.retrieve(claim["statement"], top_k=retrieval_top_k)],
+                "candidates": [{key: item.get(key) for key in
+                                ("source_id", "similarity", "compatible", "compatibility_warnings")}
+                               for item in retrieved],
             })
     payload = {
         "record_cutoff": case.record_cutoff,
         "sources": [{"source_id": source.source_id, "field_path": source.field_path,
                      "content": source.content} for source in case.sources],
-        "clinical_plan": clinical_plan,
-        "draft_record": record,
-        "claims": claims,
+        "claims": [_compact_claim(claim) for claim in claims],
         "retrieval_candidates": candidates,
-        "deterministic_issues": deterministic,
+        "deterministic_issue_hints": [{"claim_id": issue["claim_id"],
+                                       "code": issue["error_type"],
+                                       "severity": issue["severity"],
+                                       "source_ids": issue["source_ids"]}
+                                      for issue in deterministic],
     }
     raw = client.call(_messages("claim_verify_system.txt", payload), response_format, budget,
                       stage="verifier", schema=VERIFIER_SCHEMA)
     response = parse_model_json(raw, stage="verifier", client=client)
     claim_map = {claim["claim_id"]: claim for claim in claims}
-    normalization_issues = normalize_unreferenced_reasoning(response, claim_map)
-    validate_verification(response, claim_map, {source.source_id for source in case.sources})
-    response["issues"] = _merge_issues(deterministic, _merge_issues(normalization_issues, response["issues"]))
+    try:
+        model_issues = validate_verification(response, claim_map,
+                                             {source.source_id for source in case.sources})
+    except CaseError as exc:
+        _record_schema(client, False, exc.code)
+        raise
+    _record_schema(client, True)
+    model_issues, dismissed = _guard_source_supported_model_issues(case, model_issues)
+    response["issues"] = _merge_issues(deterministic, model_issues)
+    response["source_guard"] = {"dismissed_count": len(dismissed),
+                                "dismissed": dismissed}
     return response
 
 
-def normalize_unreferenced_reasoning(value, claim_map: dict[str, dict]) -> list[dict]:
-    """Downgrade untraceable reasoning without inventing a patient source.
-
-    Patient facts remain strict. Only inference/clinical_plan claims with an otherwise
-    grounded verdict and an empty source list are converted to the existing review
-    verdict and surfaced as a medium-risk issue.
-    """
-    if not isinstance(value, dict) or not isinstance(value.get("claims"), list):
-        return []
-    issues = []
-    for item in value["claims"]:
-        if not isinstance(item, dict) or item.get("claim_id") not in claim_map:
-            continue
-        claim = claim_map[item["claim_id"]]
-        if (claim.get("claim_type") in ("inference", "clinical_plan")
-                and item.get("verdict") in ("GROUNDED", "PARTIALLY_GROUNDED")
-                and item.get("source_ids") == []):
-            item["verdict"] = "REQUIRES_CLINICIAN_REVIEW"
-            rationale = item.get("rationale")
-            if isinstance(rationale, str):
-                item["rationale"] = rationale + "；缺少可追踪的患者事实来源，程序降级为需医生审核。"
-            error_type = ("UNREFERENCED_CLINICAL_RECOMMENDATION"
-                          if claim["claim_type"] == "clinical_plan" else "UNREFERENCED_REASONING")
-            issues.append(_issue(claim, error_type, "medium",
-                                 "保留不确定性；如主张患者个体依据，应引用实际支持来源，否则列为待医生审核。", []))
-    return issues
-
-
-def validate_verification(value, claim_map: dict[str, dict], source_ids: set[str]) -> None:
-    if not isinstance(value, dict) or not isinstance(value.get("claims"), list) or not isinstance(value.get("issues"), list):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验结果必须包含 claims 和 issues 数组。")
-    if set(value) != {"claims", "issues"}:
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验结果顶层字段不完整或含未知字段。")
-    returned_ids = []
-    for item in value["claims"]:
-        if (not isinstance(item, dict) or set(item) != {"claim_id", "verdict", "rationale", "source_ids"}
-                or item.get("claim_id") not in claim_map):
-            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 claims 引用了不存在的 claim_id。")
-        returned_ids.append(item["claim_id"])
-        verdict = item.get("verdict")
-        allowed = (REASONING_VERDICTS if claim_map[item["claim_id"]]["claim_type"] in ("inference", "clinical_plan")
-                   else FACT_VERDICTS)
-        if verdict not in allowed:
-            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 verdict 非法。")
-        if not isinstance(item.get("rationale"), str):
-            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 rationale 必须是字符串。")
-        refs = item.get("source_ids")
+def validate_verification(value, claim_map: dict[str, dict], source_ids: set[str]) -> list[dict]:
+    """Validate full coverage and expand compact issues into internal locators."""
+    if (not isinstance(value, dict) or set(value) != {"checked_claim_ids", "issues"}
+            or not isinstance(value.get("checked_claim_ids"), list)
+            or not isinstance(value.get("issues"), list)):
+        raise CaseError("INVALID_CLAIM_VERIFICATION",
+                        "核验结果必须仅包含 checked_claim_ids 和 issues 数组。")
+    checked = value["checked_claim_ids"]
+    if (any(not isinstance(claim_id, str) for claim_id in checked)
+            or len(checked) != len(set(checked)) or set(checked) != set(claim_map)):
+        raise CaseError("INCOMPLETE_CLAIM_COVERAGE",
+                        "checked_claim_ids 必须无重复地完整覆盖全部 Claim。")
+    result = []
+    seen = set()
+    for item in value["issues"]:
+        expected = {"claim_id", "code", "severity", "hint", "source_ids"}
+        if not isinstance(item, dict) or set(item) != expected or item.get("claim_id") not in claim_map:
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 引用了未知 Claim 或字段无效。")
+        key = (item["claim_id"], item["code"])
+        if key in seen:
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "同一 Claim 的同类 issue 不得重复。")
+        seen.add(key)
+        if item["code"] not in VERIFIER_ISSUE_CODES:
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue code 非法。")
+        if item["severity"] not in ("high", "medium", "low"):
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue severity 非法。")
+        if item["code"] in HARD_ERROR_CODES and item["severity"] != "high":
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "硬性事实错误必须标记为 high。")
+        if not isinstance(item["hint"], str) or not item["hint"].strip():
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue hint 不能为空。")
+        refs = item["source_ids"]
         if not isinstance(refs, list) or any(ref not in source_ids for ref in refs):
-            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验结果引用了不存在的 source_id。")
-        if verdict in {"SUPPORTED", "REFUTED", "GROUNDED", "PARTIALLY_GROUNDED"} and not refs:
-            raise CaseError("INVALID_CLAIM_VERIFICATION", "有依据的核验 verdict 必须引用至少一个 source_id。")
-    if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != set(claim_map):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验结果必须逐一覆盖全部 claim_id 且不得重复。")
-    for issue in value["issues"]:
-        _validate_issue(issue, claim_map, source_ids)
+            raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 引用了不存在的 source_id。")
+        result.append(_issue(claim_map[item["claim_id"]], item["code"], item["severity"],
+                             item["hint"], refs))
+    return result
+
+
+def _compact_claim(claim: dict) -> dict:
+    return {"id": claim["claim_id"], "section": claim["section"],
+            "type": claim["claim_type"], "text": claim["statement"],
+            "declared_source_ids": claim.get("source_ids", [])}
 
 
 def deterministic_claim_issues(case: Case, claims: list[dict]) -> list[dict]:
@@ -138,6 +140,13 @@ def deterministic_claim_issues(case: Case, claims: list[dict]) -> list[dict]:
                 word in corpus for word in ("待完善", "拟行", "计划", "尚未取得")):
             issues.append(_issue(claim, "PLAN_AS_COMPLETED", "high",
                                  "计划或等待中的检查不得写成已经完成。", []))
+        if (any(word in statement for word in ("结果阴性", "检查阴性", "检测阴性"))
+                and any(word in corpus for word in ("未检查", "未行", "未执行", "尚未检查"))):
+            issues.append(_issue(claim, "RESULT_AS_AVAILABLE", "high",
+                                 "未检查或未执行不能改写为检查结果阴性。",
+                                 [source.source_id for source in case.sources
+                                  if any(word in source.content for word in
+                                         ("未检查", "未行", "未执行", "尚未检查"))]))
         if _asserts_unperformed_or_untreated(statement) and not _negative_status_supported(statement, corpus):
             issues.append(_issue(claim, "UNKNOWN_AS_NEGATIVE", "high",
                                  "原始资料未提供该检查或治疗的执行状态，不得写成未执行、未进行或未用药。", []))
@@ -162,34 +171,39 @@ def has_blocking_issues(verification: dict) -> bool:
 
 
 def issues_for_revision(verification: dict) -> list[dict]:
-    return [issue for issue in verification.get("issues", []) if issue.get("severity") == "high"]
+    """Return at most one patch target per Claim while retaining all risk hints.
+
+    A single false statement can trigger both a deterministic rule and a model
+    issue.  The verifier log keeps every issue, but the reviser must receive one
+    unambiguous edit target for that Claim.
+    """
+    grouped = {}
+    for issue in verification.get("issues", []):
+        if issue.get("severity") != "high":
+            continue
+        claim_id = issue.get("claim_id")
+        if claim_id not in grouped:
+            grouped[claim_id] = dict(issue)
+            continue
+        current = grouped[claim_id]
+        hints = [part for part in (current.get("revision_hint"), issue.get("revision_hint"))
+                 if isinstance(part, str) and part]
+        current["revision_hint"] = "；".join(dict.fromkeys(hints))
+        current["source_ids"] = list(dict.fromkeys(
+            list(current.get("source_ids", [])) + list(issue.get("source_ids", []))))
+    return list(grouped.values())
 
 
 def issues_for_review(verification: dict) -> list[dict]:
     return [issue for issue in verification.get("issues", []) if issue.get("severity") == "medium"]
 
 
-def _validate_issue(issue, claim_map: dict[str, dict], source_ids: set[str]) -> None:
-    expected = {"claim_id", "section", "statement", "error_type", "severity", "revision_hint", "source_ids"}
-    if (not isinstance(issue, dict) or set(issue) != expected
-            or issue.get("claim_id") not in claim_map or issue.get("section") not in SECTIONS):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 的 claim_id/section 非法。")
-    claim = claim_map[issue["claim_id"]]
-    if issue.get("section") != claim["section"] or issue.get("statement") != claim["statement"]:
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 必须精确对应原 claim 的 section 和 statement。")
-    if issue.get("severity") not in ("high", "medium", "low"):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue severity 非法。")
-    if not all(isinstance(issue.get(key), str) for key in ("statement", "error_type", "revision_hint")):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 文本字段非法。")
-    refs = issue.get("source_ids")
-    if not isinstance(refs, list) or any(ref not in source_ids for ref in refs):
-        raise CaseError("INVALID_CLAIM_VERIFICATION", "核验 issue 引用了不存在的 source_id。")
-
-
 def _issue(claim: dict, error_type: str, severity: str, hint: str, source_ids: list[str]) -> dict:
-    return {"claim_id": claim["claim_id"], "section": claim["section"], "statement": claim["statement"],
-            "error_type": error_type, "severity": severity, "revision_hint": hint,
-            "source_ids": source_ids}
+    return {"claim_id": claim["claim_id"], "section": claim["section"],
+            "statement": claim["statement"], "error_type": error_type,
+            "severity": severity, "revision_hint": hint, "source_ids": source_ids,
+            "span_start": claim.get("span_start"), "span_end": claim.get("span_end"),
+            "item_index": claim.get("item_index")}
 
 
 def _matching_sources(case: Case, token: str) -> list[str]:
@@ -206,11 +220,37 @@ def _merge_issues(first: list[dict], second: list[dict]) -> list[dict]:
     return result
 
 
+def _guard_source_supported_model_issues(case: Case, issues: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Reject model issues that directly contradict an explicit source statement.
+
+    This guard is intentionally narrow: it only dismisses an unsupported-negative
+    issue when the same negative patient fact is explicit, or a contradiction
+    issue when the generated statement itself appears in a source. Other semantic
+    disputes remain reviewable by the model/human.
+    """
+    kept = []
+    dismissed = []
+    for issue in issues:
+        code = issue.get("error_type")
+        statement = issue.get("statement", "")
+        supported = (code == "UNSUPPORTED_NEGATIVE" and
+                     _explicit_negative_supported(case, statement))
+        supported = supported or (code == "PATIENT_FACT_CONTRADICTION" and
+                                  (_statement_directly_supported(case, statement)
+                                   or _explicit_negative_supported(case, statement)))
+        if supported:
+            dismissed.append({"claim_id": issue.get("claim_id"), "code": code,
+                              "reason": "explicit_source_support"})
+        else:
+            kept.append(issue)
+    return kept, dismissed
+
+
 _NEGATIVE_ACTIONS = ("未执行", "未进行", "未接受", "未使用", "未用药", "未予", "未行", "尚未开始")
 _UNCERTAINTY_WORDS = ("待排", "疑似", "初步诊断", "考虑", "可能")
 _CONTRADICTION_CONCEPTS = (
     "胸痛", "胸闷", "气促", "呼吸困难", "咯血", "寒战", "盗汗", "消瘦",
-    "恶心", "呕吐", "腹痛", "腹泻", "尿频", "尿急", "尿痛", "皮疹",
+    "恶心", "呕吐", "右上腹疼痛", "上腹疼痛", "腹痛", "腹泻", "尿频", "尿急", "尿痛", "皮疹",
     "关节肿痛", "口腔溃疡", "光过敏", "发绀",
 )
 
@@ -248,12 +288,16 @@ def _statement_is_uncertain(statement: str) -> bool:
 
 
 def _explicit_fact_contradiction(case: Case, statement: str) -> list[str]:
-    asserted = _positive_concepts(statement)
-    if not asserted:
+    asserted_positive = _positive_concepts(statement)
+    asserted_negative = _negated_concepts(statement)
+    if not asserted_positive and not asserted_negative:
         return []
     matched = []
     for source in case.sources:
-        if asserted & _negated_concepts(source.content):
+        if _normalized_patient_text(statement) in _normalized_patient_text(source.content):
+            continue
+        if (asserted_positive & _negated_concepts(source.content)
+                or asserted_negative & _positive_concepts(source.content)):
             matched.append(source.source_id)
     return list(dict.fromkeys(matched))
 
@@ -284,7 +328,45 @@ def _negated_concepts(text: str) -> set[str]:
     for match in re.finditer(rf"(?:无|未见|不伴)(?:明显)?({list_pattern})", text):
         phrase = match.group(1)
         concepts.update(concept for concept in _CONTRADICTION_CONCEPTS if concept in phrase)
+    # Permit anatomical/degree modifiers between the negator and concept, for
+    # example “无右上腹疼痛”. Reject causal/occurrence phrases such as
+    # “无明显诱因间断出现咳嗽”, where “无” does not negate the symptom.
+    for clause in re.split(r"[，。；;！？\n]", text):
+        for concept in _CONTRADICTION_CONCEPTS:
+            for occurrence in re.finditer(re.escape(concept), clause):
+                prefix = clause[max(0, occurrence.start() - 18):occurrence.start()]
+                negators = list(re.finditer(r"(?:无|未见|不伴)", prefix))
+                if not negators:
+                    continue
+                between = prefix[negators[-1].end():]
+                if len(between) <= 14 and not any(word in between for word in
+                                                  ("诱因", "原因", "出现", "发生", "发作")):
+                    concepts.add(concept)
     return concepts
+
+
+def _explicit_negative_supported(case: Case, statement: str) -> bool:
+    negated = _negated_concepts(statement)
+    if not negated:
+        return False
+    for source in case.sources:
+        source_negative = _negated_concepts(source.content)
+        source_positive = _positive_concepts(source.content)
+        if negated <= source_negative and not (negated & source_positive):
+            return True
+        if _normalized_patient_text(statement) in _normalized_patient_text(source.content):
+            return True
+    return False
+
+
+def _statement_directly_supported(case: Case, statement: str) -> bool:
+    needle = _normalized_patient_text(statement)
+    return bool(needle) and any(needle in _normalized_patient_text(source.content)
+                                for source in case.sources)
+
+
+def _normalized_patient_text(value: str) -> str:
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9.%℃μ]+", "", value).replace("患者", "")
 
 
 def _exam_documented_before_admission(corpus: str) -> bool:
@@ -296,3 +378,9 @@ def _messages(prompt_name: str, payload: dict) -> list[dict]:
     system = (BASE_DIR / "prompts" / prompt_name).read_text(encoding="utf-8")
     return [{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+
+def _record_schema(client, success: bool, error_type=None) -> None:
+    recorder = getattr(client, "record_schema_result", None)
+    if recorder is not None:
+        recorder("verifier", success, error_type)
