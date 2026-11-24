@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from .clinical_graph import ClinicalEvidenceGraph
@@ -13,6 +14,9 @@ RELATION_WEIGHT = {
     "supports": 0.8, "contradicts": 0.9, "considers": 0.45,
     "discriminates": 0.4, "motivates_plan": 0.35, "co_evidence": 0.65,
 }
+CLINICAL_RELATIONS = frozenset({
+    "supports", "contradicts", "considers", "discriminates", "motivates_plan", "co_evidence",
+})
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,8 @@ class GraphGuidedRetriever:
         self.dense = dense; self.graph = graph; self.strategy = strategy
         self.seed_k = max(1, seed_k); self.ppr_alpha = ppr_alpha
         self.ppr_iterations = max(1, ppr_iterations); self.query_count = 0
+        self.query_audits: list[dict] = []
+        self.graph_elapsed_ms = 0.0
 
     def retrieve(self, statement: str, top_k: int = 3) -> list[GraphEvidenceCandidate]:
         if top_k <= 0:
@@ -64,11 +70,30 @@ class GraphGuidedRetriever:
         self.query_count += 1
         dense_all = self.dense.retrieve(statement, top_k=max(top_k, len(self.dense.units)))
         if not dense_all:
+            self.query_audits.append(self._audit([], [], [], {}, False, "no_dense_candidates", top_k))
             return []
         seeds = dense_all[:min(self.seed_k, len(dense_all))]
         seed_scores = _seed_scores(seeds)
-        graph_scores = (self._one_hop(seed_scores) if self.strategy == "one_hop"
-                        else self._personalized_page_rank(seed_scores))
+        clinical_edge_count = sum(edge.relation in CLINICAL_RELATIONS for edge in self.graph.edges)
+        if clinical_edge_count == 0:
+            selected = self._dense_fallback(dense_all, top_k)
+            self.query_audits.append(self._audit(
+                dense_all, seeds, selected, {}, False, "no_clinical_problem_fact_relations", top_k,
+            ))
+            return selected
+        graph_started = time.perf_counter()
+        try:
+            graph_scores = (self._one_hop(seed_scores) if self.strategy == "one_hop"
+                            else self._personalized_page_rank(seed_scores))
+        except Exception as exc:
+            self.graph_elapsed_ms += (time.perf_counter() - graph_started) * 1000
+            selected = self._dense_fallback(dense_all, top_k)
+            self.query_audits.append(self._audit(
+                dense_all, seeds, selected, {}, False,
+                f"graph_scoring_failed:{type(exc).__name__}", top_k,
+            ))
+            return selected
+        self.graph_elapsed_ms += (time.perf_counter() - graph_started) * 1000
         candidates = []
         for item in dense_all:
             source_node = self.graph.source_node_id(item.unit.source_id)
@@ -88,12 +113,77 @@ class GraphGuidedRetriever:
                 item.dense.similarity, -item.unit.ordinal,
             ))
             selected.append(best); remaining.remove(best)
+        self.query_audits.append(self._audit(dense_all, seeds, selected, graph_scores, True, None, top_k))
         return selected
 
     def stats(self) -> dict:
+        fallback_reasons = list(dict.fromkeys(
+            audit["fallback_reason"] for audit in self.query_audits if audit["fallback_reason"]
+        ))
         return {"strategy": self.strategy, "queries": self.query_count,
                 "seed_k": self.seed_k, "ppr_alpha": self.ppr_alpha,
-                "ppr_iterations": self.ppr_iterations, "graph": self.graph.stats()}
+                "ppr_iterations": (self.ppr_iterations if self.strategy == "ppr"
+                                   and any(audit["graph_executed"] for audit in self.query_audits) else 0),
+                "graph": self.graph.stats(),
+                "graph_requested": True,
+                "graph_executed": any(audit["graph_executed"] for audit in self.query_audits),
+                "graph_mode": self.strategy,
+                "graph_fallback_reason": ";".join(fallback_reasons) if fallback_reasons else None,
+                "fallback_status": bool(fallback_reasons),
+                "embedding_provider": type(self.dense.client).__name__,
+                "seed_fact_ids": _ordered_union(self.query_audits, "seed_fact_ids"),
+                "graph_edge_type_counts": self.graph.stats()["relations"],
+                "candidate_fact_ids": _ordered_union(self.query_audits, "candidate_fact_ids"),
+                "reranked_fact_ids": _ordered_union(self.query_audits, "reranked_fact_ids"),
+                "selected_source_ids": _ordered_union(self.query_audits, "selected_source_ids"),
+                "dense_seed_count": sum(audit["dense_seed_count"] for audit in self.query_audits),
+                "graph_candidate_count": sum(audit["graph_candidate_count"] for audit in self.query_audits),
+                "ranking_changed": any(audit["ranking_changed"] for audit in self.query_audits),
+                "graph_elapsed_ms": round(self.graph_elapsed_ms, 3),
+                "query_audits": list(self.query_audits)}
+
+    def _dense_fallback(self, dense_all: list[EvidenceCandidate], top_k: int) -> list[GraphEvidenceCandidate]:
+        return [GraphEvidenceCandidate(
+            item,
+            max(0.0, min(1.0, (item.similarity + 1.0) / 2.0)),
+            0.0,
+            _source_salience(self.graph, item.unit.source_id),
+            _source_priority(item.unit.field_path),
+            "dense_fallback",
+        ) for item in dense_all[:top_k]]
+
+    def _audit(self, dense_all: list[EvidenceCandidate], seeds: list[EvidenceCandidate],
+               selected: list[GraphEvidenceCandidate], graph_scores: dict[str, float],
+               executed: bool, fallback_reason: str | None, top_k: int) -> dict:
+        seed_sources = list(dict.fromkeys(item.unit.source_id for item in seeds))
+        candidate_sources = list(dict.fromkeys(item.unit.source_id for item in dense_all))
+        selected_sources = list(dict.fromkeys(item.unit.source_id for item in selected))
+        dense_top_sources = [item.unit.source_id for item in dense_all[:top_k]]
+        reranked_sources = [item.unit.source_id for item in selected]
+        return {
+            "query_index": len(self.query_audits) + 1,
+            "graph_executed": executed,
+            "fallback_reason": fallback_reason,
+            "dense_seed_count": len(seeds),
+            "graph_candidate_count": len(dense_all),
+            "seed_source_ids": seed_sources,
+            "seed_fact_ids": self._fact_ids_for_sources(seed_sources),
+            "candidate_fact_ids": self._fact_ids_for_sources(candidate_sources),
+            "reranked_fact_ids": self._fact_ids_for_sources(selected_sources),
+            "selected_source_ids": selected_sources,
+            "ppr_scores": {
+                node_id.removeprefix("source:"): round(score, 6)
+                for node_id, score in sorted(graph_scores.items()) if score > 0
+            },
+            "ranking_changed": dense_top_sources != reranked_sources,
+        }
+
+    def _fact_ids_for_sources(self, source_ids: list[str]) -> list[str]:
+        selected = set(source_ids)
+        return [str(node.attributes["fact_id"]) for node in self.graph.nodes.values()
+                if node.node_id.startswith("fact:")
+                and node.attributes.get("source_id") in selected
+                and node.attributes.get("fact_id")]
 
     def _one_hop(self, seeds: dict[str, float]) -> dict[str, float]:
         scores = dict(seeds)
@@ -160,3 +250,7 @@ def _normalise(values: dict[str, float]) -> dict[str, float]:
 def _normalise_sum(values: dict[str, float]) -> dict[str, float]:
     total = sum(values.values())
     return {key: value / total for key, value in values.items()} if total else {}
+
+
+def _ordered_union(audits: list[dict], field: str) -> list[str]:
+    return list(dict.fromkeys(value for audit in audits for value in audit.get(field, [])))

@@ -9,12 +9,14 @@ facts or the clinical plan.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .errors import CaseError
 from .model_client import (Budget, COUNTER_EVIDENCE_CODES, COUNTER_EVIDENCE_SCHEMA,
                            parse_model_json)
 from .protocol import Case
+from .prompt_profiles import load_clinical_prompt
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -48,7 +50,12 @@ def assess_agent_need(facts: list[dict], clinical_plan: dict) -> dict:
 
 
 def run_counter_evidence_agent(case: Case, facts: list[dict], clinical_plan: dict,
-                               client, response_format: str, budget: Budget) -> dict:
+                               client, response_format: str, budget: Budget,
+                               evidence_bundles: list[dict] | None = None,
+                               prompt_profile: str = "contrastive",
+                               prompt_audit: dict | None = None,
+                               shared_memory_context: dict | None = None) -> dict:
+    preparation_started = time.perf_counter()
     payload = {
         "record_cutoff": case.record_cutoff,
         "source_catalog": [{"source_id": source.source_id, "field_path": source.field_path}
@@ -61,8 +68,23 @@ def run_counter_evidence_agent(case: Case, facts: list[dict], clinical_plan: dic
                    ("fact_id", "source_id", "field_path", "fact_text", "time", "value", "unit",
                     "assertion", "status", "correction")} for fact in facts],
         "problems": [_compact_problem(problem) for problem in clinical_plan.get("problems", [])],
+        "retrieval_evidence": _compact_retrieval_evidence(evidence_bundles or [], facts),
+        "retrieval_notice": (
+            "检索候选只用于定位反证或缺失证据；Dense 相似度、Graph/PPR 分数和排序均不证明事实成立，"
+            "必须回到候选的 source_id 与已有 Fact ID。"
+        ),
     }
-    system = (BASE_DIR / "prompts" / "counter_evidence_system.txt").read_text(encoding="utf-8")
+    if shared_memory_context is not None:
+        payload["shared_decision_cards"] = shared_memory_context
+    system, _ = load_clinical_prompt("counter_evidence", prompt_profile, "")
+    if prompt_audit is not None:
+        prompt_audit["counter_evidence"] = {
+            "profile": prompt_profile,
+            "system_prompt_chars": len(system),
+            "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
+            "shared_memory_injected": shared_memory_context is not None,
+            "preparation_elapsed_ms": round((time.perf_counter() - preparation_started) * 1000, 3),
+        }
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
     raw = client.call(messages, response_format, budget, stage="counter_evidence",
@@ -141,6 +163,37 @@ def _compact_problem(problem: dict) -> dict:
                             "contradicting_facts", "missing_evidence")}
                           for differential in problem.get("differential_diagnoses", [])],
     }
+
+
+def _compact_retrieval_evidence(evidence_bundles: list[dict], facts: list[dict]) -> list[dict]:
+    source_facts: dict[str, list[str]] = {}
+    for fact in facts:
+        source_id = fact.get("source_id")
+        fact_id = fact.get("fact_id")
+        if isinstance(source_id, str) and isinstance(fact_id, str):
+            source_facts.setdefault(source_id, []).append(fact_id)
+    compact = []
+    for bundle in evidence_bundles:
+        candidates = []
+        for candidate in bundle.get("candidates", [])[:3]:
+            source_id = candidate.get("source_id")
+            candidates.append({
+                "source_id": source_id,
+                "field_path": candidate.get("field_path", ""),
+                "text": str(candidate.get("text", ""))[:160],
+                "fact_ids": source_facts.get(source_id, []),
+                "dense_similarity": candidate.get("similarity"),
+                "ranking_score": candidate.get("ranking_score"),
+                "graph_relevance": candidate.get("graph_relevance"),
+                "graph_strategy": candidate.get("graph_strategy"),
+                "compatible": candidate.get("compatible"),
+            })
+        compact.append({
+            "problem_id": bundle.get("problem_id"),
+            "planner_query": bundle.get("planner_query"),
+            "candidates": candidates,
+        })
+    return compact
 
 
 def _record_schema(client, success: bool, error_type=None) -> None:

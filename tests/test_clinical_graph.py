@@ -60,6 +60,23 @@ class ClinicalGraphTests(unittest.TestCase):
             payload=results[0].to_dict()
             self.assertIn("graph_relevance",payload)
             self.assertEqual(payload["graph_strategy"],strategy)
+            stats=retriever.stats()
+            self.assertTrue(stats["graph_executed"])
+            self.assertEqual(stats["graph_mode"],strategy)
+            self.assertTrue(stats["seed_fact_ids"])
+            self.assertTrue(stats["selected_source_ids"])
+
+    def test_missing_clinical_relations_uses_disclosed_dense_fallback(self):
+        graph=build_clinical_graph(self.case,self.facts,None)
+        dense=DenseEvidenceRetriever(self.case,MockEmbeddingClient(dimension=16),min_similarity=-1)
+        retriever=GraphGuidedRetriever(dense,graph,strategy="ppr",seed_k=2)
+        results=retriever.retrieve("发热咳嗽",top_k=2)
+        stats=retriever.stats()
+        self.assertEqual(len(results),2)
+        self.assertFalse(stats["graph_executed"])
+        self.assertTrue(stats["fallback_status"])
+        self.assertEqual(stats["graph_fallback_reason"],"no_clinical_problem_fact_relations")
+        self.assertTrue(all(item.strategy=="dense_fallback" for item in results))
 
 
 if __name__=="__main__": unittest.main()

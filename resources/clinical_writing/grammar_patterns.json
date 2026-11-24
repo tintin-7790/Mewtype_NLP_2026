@@ -1,0 +1,132 @@
+{
+  "version": "2026-11-24.v1",
+  "notice": "These placeholders are writing scaffolds, never to be copied verbatim in final record.",
+  "patterns": [
+    {
+      "id": "G01",
+      "section": "case_features",
+      "sentence_shell": "[年龄/影响因素]患者，因[主症状]持续[时长]就诊，近[时段]由[既往程度]变化为[近期程度]。",
+      "relation_role": "disease_course",
+      "guard": "缺少演变信息时省略频次变化，不填占位数字"
+    },
+    {
+      "id": "G02",
+      "section": "case_features",
+      "sentence_shell": "[日期][检查名称]显示[指标][数值+单位]；[另一日期]同项结果为[数值+单位]。",
+      "relation_role": "dated_measurements",
+      "guard": "日期、项目、单位必须分别在对应来源中存在"
+    },
+    {
+      "id": "G03",
+      "section": "case_features",
+      "sentence_shell": "既往于[日期]接受[操作及部位]，现有资料对[细节]未提供进一步说明。",
+      "relation_role": "procedure",
+      "guard": "治疗方式只用来源明确词，不混淆支架和球囊"
+    },
+    {
+      "id": "G04",
+      "section": "case_features",
+      "sentence_shell": "患者自述[情况]，但[相反/不同来源]与之不一致，相关细节需核实。",
+      "relation_role": "reported_claim",
+      "guard": "仅当确实存在陈述分歧时使用"
+    },
+    {
+      "id": "G05",
+      "section": "case_features",
+      "sentence_shell": "原文明确否认[症状]；本次资料尚未提供[另一项检查结果]。",
+      "relation_role": "negative_vs_missing",
+      "guard": "不能把两个状态合并"
+    },
+    {
+      "id": "G06",
+      "section": "diagnostic_discussion",
+      "sentence_shell": "目前考虑[待证实方向]，支持依据为[本例具体事实1]及[事实2]；但[明确反证/证据局限]，因此尚需[区分证据]进一步判断。",
+      "relation_role": "hypothesis_support_limit",
+      "guard": "不得将原文初步诊断当作独立确诊证据"
+    },
+    {
+      "id": "G07",
+      "section": "diagnostic_discussion",
+      "sentence_shell": "[鉴别方向]同样可解释[共同现象]，但本例[已有的限制事实/缺失的关键信息]，暂不能据此确定或排除。",
+      "relation_role": "differential",
+      "guard": "无具体支持点就不必列此鉴别"
+    },
+    {
+      "id": "G08",
+      "section": "diagnostic_discussion",
+      "sentence_shell": "现有资料证实[问题A]与[问题B]同时存在，但尚不足以确定两者之间的因果关系。",
+      "relation_role": "causal_uncertainty",
+      "guard": "两项检验异常不等于病因明确"
+    },
+    {
+      "id": "G09",
+      "section": "diagnostic_discussion",
+      "sentence_shell": "既往[风险因素]增加评估[方向]的必要性，但不等于[当前事件]已得到客观确认。",
+      "relation_role": "risk_not_diagnosis",
+      "guard": "风险因素不能当确诊证据"
+    },
+    {
+      "id": "G10",
+      "section": "diagnostic_discussion",
+      "sentence_shell": "[数值A]与[数值B]分别来自[日期A]和[日期B]；由于[其他指标未知/方法不同]，不能推断[未被支持的趋势]。",
+      "relation_role": "temporal_limitation",
+      "guard": "不能擅自拼接不同检验批次"
+    },
+    {
+      "id": "G11",
+      "section": "plan",
+      "sentence_shell": "围绕[主要问题]，建议由医生核对[既有资料]并结合病情评估[待查指标]，以区分[具体鉴别方向]。",
+      "relation_role": "plan_for_problem",
+      "guard": "避免空泛检查清单"
+    },
+    {
+      "id": "G12",
+      "section": "plan",
+      "sentence_shell": "原始记录拟安排[项目]，尚未提供结果；后续依据检查结果与病情变化再确定具体处理。",
+      "relation_role": "planned_not_done",
+      "guard": "已完成才可写完成"
+    },
+    {
+      "id": "G13",
+      "section": "plan",
+      "sentence_shell": "核实[药物名称及方案]的当前实际执行和依从性，具体调整由临床医生结合评估决定。",
+      "relation_role": "medication_state",
+      "guard": "不从示例复制给药剂量或自主建议停药"
+    },
+    {
+      "id": "G14",
+      "section": "plan",
+      "sentence_shell": "观察[与问题对应的症状变化]及[可核实指标]，如出现新的异常由医生及时复评。",
+      "relation_role": "monitoring",
+      "guard": "不发明监测频次"
+    },
+    {
+      "id": "G15",
+      "section": "evidence",
+      "sentence_shell": "原始资料显示[患者事实]（[原始source_id]）。",
+      "relation_role": "fact_anchor",
+      "guard": "最终JSON evidence必须保留statement和合法source_ids而非括号文本"
+    },
+    {
+      "id": "G16",
+      "section": "evidence",
+      "sentence_shell": "现有[有来源的事实]提示[待证实判断]，仍需[重要局限]确认。",
+      "relation_role": "inference",
+      "guard": "只能用kind=inference"
+    },
+    {
+      "id": "G17",
+      "section": "review_items",
+      "sentence_shell": "[具体检查]结果在当前资料中未提供，需确认其是否已完成以及实际结果。",
+      "relation_role": "missing_vs_not_done",
+      "guard": "不要直接写“未检查”"
+    },
+    {
+      "id": "G18",
+      "section": "review_items",
+      "sentence_shell": "[陈述A]与[陈述B]关于[时间/用药/数值]存在差异，需回查原始记录。",
+      "relation_role": "conflict",
+      "guard": "不同日期正常变化不算矛盾"
+    }
+  ]
+}

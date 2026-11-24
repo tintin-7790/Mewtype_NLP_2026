@@ -1,17 +1,46 @@
 # 循证智录：首次病程记录生成程序
 
-本项目面向教学比赛，不用于真实诊疗。当前研究版本 `0.4.4-research` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供对比式临床规划、问题条件化证据写作、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订，并加入默认关闭的轻量临床图重排与一次性反证代理；正式 Schema、赛方模型参数和资源配额尚待公布。
+本项目面向教学比赛，不用于真实诊疗。当前研究版本 `0.4.9-prompt-v2-research-modules` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供自动输入协议识别、对比式临床规划、问题条件化证据写作、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订，并加入默认关闭、带完整执行审计的轻量临床图重排、一次性反证代理、五阶段 Prompt v2、临床写作辅助资源和单病例 Shared Clinical Memory；正式 Schema、赛方模型参数和资源配额尚待公布。
 
 ## 运行
 
-Python 3.11 兼容性开发；最终 Linux/Python 版本待赛方确认。相对输入、输出、配置和日志路径均按**启动命令的当前工作目录**解析；提示词按程序目录定位。
+Python 3.11 兼容性开发。正式提交包在包根目录放置 `.env` 和 `input.json` 后，直接无参数启动：
+
+```bash
+python main.py
+```
+
+最新材料要求的两参数入口同样是 Profile 驱动入口，输入输出真正使用命令行路径：
+
+```bash
+python3.11 main.py --input input.json --output output.json
+```
+
+无参数模式严格读取包根目录 `.env` 中的 `MODEL_NAME` 和完整 `ENDPOINT`，读取 `input.json`，并原子生成 `output.json` 与 `run_log.json`。`ENDPOINT` 不会被拼接；正式客户端不读取 `DASHSCOPE_API_KEY`、不发送 Authorization，也不会回退开发或 Mock 服务。当前保守默认采用一次调用的 Baseline、`text` 响应格式、零重试，避免在赛方配额与结构化输出能力公布前擅自假设。`.env.example` 只展示字段，不包含真实地址或凭据；可选 `TIMEOUT_SECONDS` 和 `MAX_RETRIES` 是有界工程控制，后者最多 10 次且每次均计入预算。
+
+正式算法由 [src/competition_profile.py](src/competition_profile.py) 的打包常量选择，不增加 `.env` 字段，也不要求赛方添加 CLI 参数。内置 `baseline_safe`、`clinical_d`、`clinical_d_agent`、`clinical_d_graph_agent` 四档；当前 `ACTIVE_COMPETITION_PROFILE="baseline_safe"`。只有官方确认至少 5 次 Qwen 调用、上下文/Token 预算及 BGE-M3 HTTP 协议，并通过固定病例复测后，才把打包常量切换到 `clinical_d_graph_agent`。正式 Profile 会在启动时校验其保留预算与实际阶段数一致；Clinical 档对仍未修复的 HIGH 风险设置最终阻断门。
+
+本地完整链路必须显式设置开发开关；程序不会因为检测到百炼变量而自动切换：
+
+```bash
+export MEWTYPE_DEV_MODE=1
+export DASHSCOPE_API_KEY='...'
+export QWEN_BASE_URL='https://.../compatible-mode/v1'
+export QWEN_MODEL='qwen-plus'
+
+python3.11 main.py --input input.json --output output.json
+```
+
+该命令自动选择 `development_clinical_d_graph_agent`：contrastive、Verifier/Reviser on、Agent always、PPR、阶段化 `json_schema`，并使用明确标记为开发测试的确定性 Mock Embedding。Mock 不是 BGE-M3，不会在 competition Profile 中启用。开发 Profile 重跑前会把已存在的输出和 `run_log.json` 复制为带 UTC 时间与 run_id 的相邻 backup，避免覆盖首次 A 版结果；正式评测仍按指定输出路径原子写入。
+
+带参数的旧 CLI 继续用于开发实验。其相对输入、输出、配置和日志路径按**启动命令的当前工作目录**解析；提示词按程序目录定位：
 
 ```bash
 python main.py --input input.json --output output.json \
   --mode competition --config config/competition.json --pipeline baseline
 ```
 
-正式配置缺失时程序以退出码 2 明确失败，绝不回退到本地模型。配置中的 `endpoint` 必须是赛方提供的完整地址；当前版本不发送认证头，也不猜测认证方式，待官方要求明确后再实现。未知官方配额没有默认值，`max_calls_per_case` 必须显式配置。
+显式 CLI 的正式配置缺失时程序以退出码 2 明确失败，绝不回退到本地模型。配置中的 `endpoint` 必须是赛方提供的完整地址；当前版本不发送认证头，也不猜测认证方式。未知官方配额没有默认值，多阶段实验的 `max_calls_per_case` 必须显式配置。无参数正式档的预算仅覆盖一次 Baseline 及显式设置的有限重试。
 
 ### 阿里云百炼开发模式
 
@@ -61,16 +90,44 @@ python main.py --input input.json --output output.json \
 
 ## 输入与输出
 
-正式入口严格接受旧规范 JSON 数组：`case_id`、`record_cutoff`、`sources[]`，每个来源含 `source_id` 和 `content`。顶层损坏、非数组、缺失/重复 `case_id` 是任务级错误；截止点或来源无效是单例失败。未知协议不会被猜测接受。
+入口默认使用 `--input-format auto` 严格识别两种格式：正式比赛 JSON 数组，或中文嵌套练习病历（单对象或同类对象数组）。正式数组仍直接进入原有协议解析器：`case_id`、`record_cutoff`、病例顺序、`source_id`、`field_path` 和内容不会被重新生成。顶层损坏、缺失/重复 `case_id` 是任务级错误；截止点或来源无效仍按原协议形成单例失败。未知结构、单个正式 Case 对象、混合协议数组以及带有部分正式字段的对象不会被猜测转成练习格式。
 
-练习中文嵌套 JSON 使用独立工具，必须显式给出病例标识和截止点：
+练习病历可以直接作为 `--input`，无需先生成中间文件：
+
+```bash
+python3.11 main.py \
+  --input "information/临床智录_练习病历数据集JSON/03_老年病科_多病共存TIA待排.json" \
+  --output information/results/03/auto_output.json \
+  --mode dev_api --pipeline clinical_pipeline
+```
+
+练习格式的每例必须含顶层 `入院记录`，可附带合法显式 `case_id`；`入院记录` 包含对象型 `一般项目` 和至少一个可识别临床章节。程序复用唯一的展平实现，在内存中确定性生成 `P0001...`，保留 `field_path`、原文和 `source_id_origin=program_derived`，不写转换中间文件。练习数组无显式 ID 时按输入顺序生成 `PRACTICE001...`。为兼容既有单文件工作流，文件名前导序号如 `03_` 仍可得到 `PRACTICE03`；改名为普通 `input.json` 时，则对排除姓名、证件、住院号、电话、住址、工作单位等直接身份字段后的原始结构生成稳定 SHA-256 短标识。科室、病种文件名和直接身份信息均不进入自动 case_id。
+
+`record_cutoff` 优先读取 `入院记录.一般项目.记录时间`，在验证日历时间后把 U+2011 等 Unicode 连字符规范成 ASCII `-`；原始时间同时保留在运行日志的 `input_adapter.case_mappings` 审计字段中，不使用系统当前时间。可按需覆盖自动 case_id；病历无可靠记录时间时必须显式提供截止点：
+
+```bash
+python3.11 main.py --input practice.json --output output.json \
+  --input-format practice --practice-case-id PRACTICE_CUSTOM \
+  --practice-record-cutoff '2026-05-08 14:25' \
+  --mode dev_api --pipeline clinical_pipeline
+```
+
+可用 `--input-format competition|practice` 强制协议并获得更早、更明确的格式错误。练习专用覆盖参数不能用于正式数组。
+
+模型调用前可使用只读诊断工具检查格式、病例数、ID、来源数、截止点和内部 Schema；它不打印病例正文，也不写文件：
+
+```bash
+python3.11 tools/check_input.py --input input.json
+```
+
+旧离线转换工具继续保留用于调试和固定输入快照：
 
 ```bash
 python tools/adapt_practice.py --input practice.json --output adapted.json \
   --case-id PRACTICE01 --record-cutoff '2026-05-03 20:30'
 ```
 
-工具确定性生成 `P0001...`，并保留 `field_path`、原文和 `source_id_origin=program_derived`。文件名不进入医学证据，记录时间不会自动当作截止点。原始 `information/` 不会被修改。
+工具与自动入口共用同一套展平逻辑。自动入口和离线工具都不会修改原始 `information/`；自动入口只在经过格式验证后把练习记录时间作为资料截止点。
 
 输出为旧规范数组。成功包含 `case_features`、`diagnostic_discussion`、`plan`、`evidence`、`review_items`；失败保留位置和 `case_id`。写入使用输出目录内临时文件并原子替换，空输入写 `[]`。
 
@@ -112,12 +169,21 @@ python3 main.py --input input.json --output output.json \
 
 `--clinical-agents adaptive` 只在透明复杂度评分达到阈值时增加一次反证审查；`always` 仅用于对照。代理使用紧凑协议：`reviewed_problem_ids` 必须完整覆盖 Planner 问题，`issues` 只返回高价值反证、方向含混 Fact、关键缺失或确定性过强，不再逐问题输出长篇 summary。输入使用带 source_id 的原文 Fact 片段和精简问题视图，不重复整份 sources/plan。代理不修改 Facts/Plan；截断或 Schema 失败会记录 `completed=false`、finish reason 和覆盖错误后回到 Writer，不进入自由讨论循环。启用任一代理模式时，每例调用预算会预留一次额外调用。
 
+Graph 模式下执行顺序为：Dense 候选 → Clinical Graph → one-hop/PPR 重排 → 紧凑检索候选交给 Counter-Evidence Agent → 同一组候选交给 Writer。Agent 和 Writer 都被明确告知 Dense/PPR 分数不是事实证明。病例日志的 `clinical.graph_retrieval` 记录 `graph_requested`、`graph_executed`、实际模式、fallback 原因、Embedding provider、种子/候选/重排 Fact ID、边类型、最终 Source ID、排序是否变化和耗时；Graph 未执行不会仅以 `enabled=true` 冒充成功。
+
 离线查看现有转换病例的 Facts 和图结构（不调用 Qwen/BGE）：
 
 ```bash
 python3.11 tools/inspect_clinical_graph.py \
-  --input information/converted/01_input.json \
-  --output /tmp/practice01_graph_audit.json
+  --input "information/临床智录_练习病历数据集JSON/03_老年病科_多病共存TIA待排.json" \
+  --output /tmp/practice03_graph_audit.json
+```
+
+离线验收 PRACTICE03 的真实图构建与 PPR 重排代码（使用确定性 Mock 向量，不能冒充 BGE-M3）：
+
+```bash
+python3.11 tools/smoke_graph_retrieval.py \
+  --output information/results/03/graph_ppr_smoke.json
 ```
 
 使用本地/获准 embedding 做一跳图重排并按复杂度触发反证代理：
@@ -132,9 +198,36 @@ python3.11 main.py --input information/converted/01_input.json \
   --clinical-response-format json_schema
 ```
 
-若 `config/retrieval.local.json` 指向本地 BGE，开发机必须已具备依赖和权重；程序不会下载。若只想验证控制流，可用 `provider=mock`，但其哈希向量不代表 BGE 语义效果。算法依据、固定评分、Agent Schema、成本和实验矩阵见 `docs/graph_rag_multi_agent_design.md`。
+若 `config/retrieval.local.json` 指向本地 BGE，开发机必须已具备依赖和权重；程序不会下载。若只想验证控制流，可用 `provider=mock`，但其哈希向量不代表 BGE 语义效果。PRACTICE03 的离线验收、真实 A/B 命令和审计字段见 `docs/d_graph_agent_integration_validation.md`；算法依据、固定评分、Agent Schema、成本和实验矩阵见 `docs/graph_rag_multi_agent_design.md`。
 
 ### Clinical Pipeline v0.4.4-research
+
+#### 独立研究开关：Prompt v2、写作知识与共享记忆
+
+当前稳定 `contrastive` 和正式 `baseline_safe` 均未改变。五阶段候选 Prompt 位于 `prompts/contrastive_v2/`，只能通过实验参数显式启用：
+
+```bash
+--clinical-prompt-profile contrastive_v2
+```
+
+Planner、Counter-Evidence Agent、Writer、Verifier、Reviser 分别加载同目录独立 Prompt，但继续使用既有 `PLANNER_SCHEMA`、`COUNTER_EVIDENCE_SCHEMA`、`MEDICAL_SCHEMA`、`VERIFIER_SCHEMA` 和 `REVISER_SCHEMA`。日志的 `prompt_manifest` 记录实际文件哈希，`prompt_audit` 记录每阶段 system/payload 字符数及准备耗时；真实 API 的 Token 和调用耗时仍由 `stage_calls` 分阶段记录。
+
+Writer 写作知识默认关闭，可单独选择规则卡，或规则卡加原创合成示例的风格提要：
+
+```bash
+--clinical-writing-guidance rules
+--clinical-writing-guidance rules_examples
+```
+
+资源只进入 Writer 的 `writing_style_context`，带有 `NOT_PATIENT_EVIDENCE` 标识。合成示例检索只返回 `style_takeaways`，不把合成病例正文、数值、药物、时间或 source_id 注入当前患者。Verifier/Reviser 不读取这些资源。
+
+单病例 Shared Clinical Memory 同样默认关闭：
+
+```bash
+--shared-clinical-memory on
+```
+
+启用后，Planner 写入基于 Fact ID 的决策卡，Graph/PPR 标注候选 Fact，Counter Agent 增量标注问题，Writer 读取紧凑卡片后仍须回查原始 Sources。对象仅在当前病例处理期间存在，不持久化、不跨病例，也不增加 Qwen 调用；Verifier/Reviser 始终直接使用原始 Sources。三个研究功能应分别做消融，不应同时打开后把差异归因给单一模块。完整接入与实验命令见 `docs/prompt_v2_shared_memory_writing_knowledge.md`。
 
 Clinical Planner 先输出内部问题表，包括优先级、来源属性、支持/反对事实、鉴别诊断、区分所需资料、计划目标和检索查询。提示词要求每个主要问题优先保留2–3个有依据的鉴别方向；只有原始资料明确否定或确有不支持事实时才列为反对证据。所有事实使用程序确定生成的 `F001...`，不存在的事实引用会使单例失败。初步诊断必须标记为 `documented_problem` 或 `mixed`，不能直接视为已证实结论。
 
@@ -201,13 +294,13 @@ python3.11 main.py --input test_input.json --output clinical_output.json \
 
 ## 日志与复现
 
-默认在输出目录写 `run_log.json`，记录 run_id、程序/提示词版本、环境、实际模型标识、非敏感参数、每例状态、调用次数、Token usage、耗时、错误和检查结果。普通日志不复制完整病例，不记录密钥。固定种子只能控制客户端可控部分，不能承诺远程模型逐字确定复现。
+默认在输出目录写 `run_log.json`，记录 run_id、程序/提示词版本、所用 Prompt 文件 SHA-256、算法 Profile、环境、实际模型标识、非敏感参数、病例标识、每例状态、调用次数、Token usage、各阶段耗时、Graph/Agent 审计、最终验证状态、错误和检查结果。普通日志不复制完整病例，不记录密钥。固定种子只能控制客户端可控部分，不能承诺远程模型逐字确定复现。
 
 ## 测试与打包
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 tools/build_package.py --team 团队名称 --version v0.4.4-research
+python3 tools/build_package.py --team 团队名称 --version v0.4.9-prompt-v2-research-modules
 ```
 
 打包脚本生成一层团队目录，仅包含运行文件、源码、提示词和资源清单，排除 `information/`、配置、凭据、缓存、虚拟环境、测试输出和本地模型。

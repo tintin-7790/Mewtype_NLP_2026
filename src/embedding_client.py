@@ -169,6 +169,13 @@ def load_embedding_client(path: Path, environment: str) -> tuple[EmbeddingClient
         )
         model_label = str(raw.get("model", ""))
     elif provider == "official":
+        allowed_official = {"provider", "top_k", "min_similarity", "max_chunk_chars"}
+        unpublished = sorted(set(raw) - allowed_official)
+        if unpublished:
+            raise TaskError(
+                "OFFICIAL_EMBEDDING_CONFIG_UNPUBLISHED",
+                "赛方 Embedding 协议未公布，当前不能接受推测字段：" + ", ".join(unpublished),
+            )
         client = OfficialEmbeddingClient()
         model_label = None
     else:

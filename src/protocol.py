@@ -27,6 +27,11 @@ def load_standard_cases(path: Path) -> list[Case | CaseError]:
         raise TaskError("INPUT_NOT_FOUND", f"输入文件不存在：{path}") from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise TaskError("INPUT_INVALID_JSON", f"输入不是有效 UTF-8 JSON：{exc}") from exc
+    return parse_standard_cases(raw)
+
+
+def parse_standard_cases(raw) -> list[Case | CaseError]:
+    """Parse an already-loaded competition payload without changing protocol semantics."""
     if not isinstance(raw, list):
         raise TaskError("INPUT_PROTOCOL_ERROR", "正式输入顶层必须是 JSON 数组。")
     ids = []

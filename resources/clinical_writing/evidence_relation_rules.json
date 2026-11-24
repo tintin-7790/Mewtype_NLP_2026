@@ -1,0 +1,103 @@
+{
+  "version": "1.0",
+  "priority": [
+    "source_asserts_fact",
+    "status_of",
+    "observed_at",
+    "reported_by",
+    "supersedes",
+    "supports",
+    "limits",
+    "contradicts",
+    "missing_discriminator",
+    "inference_from",
+    "plan_for"
+  ],
+  "relations": [
+    {
+      "id": "source_asserts_fact",
+      "direction": "Source→Fact",
+      "meaning": "原始字段直接陈述；不验证医学真实性",
+      "validation": "fact.source_id必须存在当前病例"
+    },
+    {
+      "id": "supports",
+      "direction": "Fact→ClinicalProblem",
+      "meaning": "观察与问题相符但不等于确诊",
+      "validation": "需有Fact ID以及具体关系说明"
+    },
+    {
+      "id": "limits",
+      "direction": "Fact→Hypothesis",
+      "meaning": "事实限制某判断确定程度，可能并非直接反对",
+      "validation": "不能使用未提及当阴性"
+    },
+    {
+      "id": "contradicts",
+      "direction": "Fact→Hypothesis",
+      "meaning": "原始资料明确反对该方向",
+      "validation": "必须有原文明确反证"
+    },
+    {
+      "id": "missing_discriminator",
+      "direction": "ClinicalProblem→MissingEvidence",
+      "meaning": "尚未提供且可区分候选方向的资料",
+      "validation": "不等于未做检查"
+    },
+    {
+      "id": "observed_at",
+      "direction": "Fact→TimePoint",
+      "meaning": "检验或临床事实发生/记录时间",
+      "validation": "日期和原文匹配"
+    },
+    {
+      "id": "performed_at",
+      "direction": "Procedure→TimePoint",
+      "meaning": "有来源证明某操作已实施",
+      "validation": "与拟实施严格区分"
+    },
+    {
+      "id": "reported_by",
+      "direction": "Fact→Reporter",
+      "meaning": "自述/家属/正式检查的证据层级",
+      "validation": "自述不能升级为正式报告"
+    },
+    {
+      "id": "status_of",
+      "direction": "Fact→State",
+      "meaning": "completed/ongoing/planned/unknown",
+      "validation": "unknown绝不能默认为not_done"
+    },
+    {
+      "id": "inference_from",
+      "direction": "Inference→Fact",
+      "meaning": "可追溯但不必逐字同义的临床判断",
+      "validation": "保留疑似与鉴别措辞"
+    },
+    {
+      "id": "plan_for",
+      "direction": "PlanGoal→ClinicalProblem",
+      "meaning": "检查和观察解决哪个问题",
+      "validation": "不补造具体执行方案"
+    },
+    {
+      "id": "conflicts_with",
+      "direction": "Fact→Fact",
+      "meaning": "不同日期/来源的事实陈述冲突",
+      "validation": "先排除时间不同、方法不同等不构成冲突的情况"
+    },
+    {
+      "id": "supersedes",
+      "direction": "Correction→Fact",
+      "meaning": "更正关系",
+      "validation": "适用更正但保留审核可溯源"
+    }
+  ],
+  "safety_invariants": [
+    "Graph/Retrieval分数只能作为搜索信号，不构成患者事实",
+    "医学示例中的source_id不允许混入当前病例",
+    "缺失结果不等于未做检查",
+    "最新记录不必然推翻不同时间的历史观察",
+    "所有诊疗计划需区分已实施与拟建议"
+  ]
+}

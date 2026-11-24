@@ -170,9 +170,11 @@ class ChatCompletionsClient:
             except CaseError as exc: last = exc
         raise last or CaseError("MODEL_ERROR", "模型调用失败。")
     def _request(self, messages, fmt, budget, stage, schema):
-        body = {"model": self.config.model, "messages": messages, "stream": False,
-                "temperature": self.config.temperature, "top_p": self.config.top_p,
-                "max_tokens": self.config.max_tokens, "seed": self.config.seed, **self.config.extra_body}
+        body = {"model": self.config.model, "messages": messages, "stream": False}
+        if self.config.send_generation_parameters:
+            body.update({"temperature": self.config.temperature, "top_p": self.config.top_p,
+                         "max_tokens": self.config.max_tokens, "seed": self.config.seed})
+        body.update(self.config.extra_body)
         if fmt == "json_object": body["response_format"] = {"type": "json_object"}
         elif fmt == "json_schema":
             selected_schema = schema or MEDICAL_SCHEMA
@@ -207,12 +209,12 @@ class ChatCompletionsClient:
                     raise CaseError(code, f"模型接口 HTTP {exc.code}，请求格式={fmt}；未执行格式回退。") from exc
                 if attempt == self.config.max_retries:
                     raise CaseError("MODEL_HTTP_ERROR", f"模型接口 HTTP {exc.code}，请求格式={fmt}。") from exc
-            except (urllib.error.URLError, socket.timeout, KeyError, ValueError) as exc:
+            except (urllib.error.URLError, socket.timeout, TimeoutError, KeyError, ValueError) as exc:
                 self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__, prompt_metrics)
                 self._debug({"event": "client_error", "model": self.config.model, "stage": stage,
                              "requested_response_format": fmt, "error_type": type(exc).__name__})
                 if attempt == self.config.max_retries:
-                    code = "MODEL_TIMEOUT" if isinstance(exc, (socket.timeout, TimeoutError)) else "MODEL_ERROR"
+                    code = "MODEL_TIMEOUT" if _is_timeout_error(exc) else "MODEL_ERROR"
                     raise CaseError(code, f"模型接口失败：{type(exc).__name__}") from exc
 
     def _record_call_event(self, stage, fmt, success, usage, started, error_type=None,
@@ -224,7 +226,9 @@ class ChatCompletionsClient:
                                  "token_usage": _safe_usage(usage),
                                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
                                  "call_error_type": error_type, "finish_reason": finish_reason,
-                                 "max_tokens": self.config.max_tokens, **(prompt_metrics or {})})
+                                 "max_tokens": (self.config.max_tokens
+                                                if self.config.send_generation_parameters else None),
+                                 **(prompt_metrics or {})})
 
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
@@ -363,6 +367,14 @@ def _safe_usage(usage):
             if isinstance(value, int) and value >= 0:
                 result[key] = value
     return result
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, (socket.timeout, TimeoutError))
+    return False
 
 
 def _record_parse(client, stage, success, error_type=None, position=None):

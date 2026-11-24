@@ -1,0 +1,667 @@
+{
+  "version": "2026-11-24.research-v1",
+  "intended_use": "writer_style_guidance_only",
+  "not_clinical_evidence": true,
+  "cards": [
+    {
+      "id": "CF01",
+      "section": "case_features",
+      "title": "病例特点按病程演变归纳",
+      "tags": [
+        "general",
+        "timeline"
+      ],
+      "trigger_keywords": [
+        "入院",
+        "病程",
+        "症状",
+        "加重",
+        "发作"
+      ],
+      "priority": 4,
+      "writing_rule": "先说明主问题、起病时间和演变；用“起初…，近…增至…，每次…”突出变化；再选关键体征与检查，不复写完整现病史。",
+      "avoid": "将“1月内症状增多”写成单次就诊时的当前频次；通篇堆砌正常体检。",
+      "relation_types": [
+        "observed_at",
+        "progression"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "CF02",
+      "section": "case_features",
+      "title": "具有区分意义的阴性事实",
+      "tags": [
+        "general",
+        "negation"
+      ],
+      "trigger_keywords": [
+        "否认",
+        "无",
+        "未见",
+        "阴性"
+      ],
+      "priority": 4,
+      "writing_rule": "仅纳入原资料明确记载且有鉴别价值的阴性事实；使用“原文明确否认…/查体未见…”。",
+      "avoid": "将来源未提及症状写成“否认”；用“无明显异常”概括未查字段。",
+      "relation_types": [
+        "limits",
+        "negative_finding"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "CF03",
+      "section": "case_features",
+      "title": "带时间和来源的检查值",
+      "tags": [
+        "general",
+        "numeric",
+        "timeline"
+      ],
+      "trigger_keywords": [
+        "血红蛋白",
+        "肌酐",
+        "胆汁酸",
+        "心电图",
+        "化验",
+        "超声"
+      ],
+      "priority": 4,
+      "writing_rule": "检查结果遵循“检查时间/场所—指标—原样数值及单位—原文状态”；多次结果各自对应日期，不拼接成单次检查。",
+      "avoid": "把两次检验不同指标合并到同一日期；擅自解释未提供的正常范围。",
+      "relation_types": [
+        "observed_at",
+        "supported_by"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "CF04",
+      "section": "case_features",
+      "title": "自述与客观证据分层",
+      "tags": [
+        "general",
+        "provenance"
+      ],
+      "trigger_keywords": [
+        "自诉",
+        "家属",
+        "外院",
+        "未携带",
+        "报告原件"
+      ],
+      "priority": 5,
+      "writing_rule": "将“患者自述/家属陈述/外院报告原件可见”分开，可靠程度有限时保留“待核实”。",
+      "avoid": "把患者转述的外院“阴影”写成确诊的影像诊断。",
+      "relation_types": [
+        "reported_by",
+        "provenance"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "CF05",
+      "section": "case_features",
+      "title": "治疗与手术事件时间线",
+      "tags": [
+        "cardiology",
+        "procedure",
+        "timeline"
+      ],
+      "trigger_keywords": [
+        "PCI",
+        "支架",
+        "介入",
+        "术后",
+        "球囊"
+      ],
+      "priority": 5,
+      "writing_rule": "有多次介入时按日期逐一对齐“血管部位—操作类型—后续症状或用药”，只写明确完成的操作。",
+      "avoid": "将球囊扩张写成支架植入；把计划复查写成已完成。",
+      "relation_types": [
+        "performed_at",
+        "procedure_at"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "CF06",
+      "section": "case_features",
+      "title": "合并症只选影响当前问题者",
+      "tags": [
+        "general",
+        "multimorbidity"
+      ],
+      "trigger_keywords": [
+        "高血压",
+        "糖尿病",
+        "慢性肾",
+        "妊娠",
+        "房颤"
+      ],
+      "priority": 3,
+      "writing_rule": "仅保留可能改变本次鉴别、风险、药物或检查选择的合并症；写出其与当前问题的关联，而非罗列所有既往史。",
+      "avoid": "照搬全部家族史、婚育史、无关阴性项目。",
+      "relation_types": [
+        "risk_modifier"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD01",
+      "section": "diagnostic_discussion",
+      "title": "每一判断应对应直接依据",
+      "tags": [
+        "general",
+        "reasoning"
+      ],
+      "trigger_keywords": [
+        "拟诊",
+        "诊断",
+        "鉴别",
+        "原因"
+      ],
+      "priority": 5,
+      "writing_rule": "用“考虑…：支持的是（本例事实A、B）；但（限制事实C/关键结果未知），因此现阶段宜表述为…”。鉴别按本例相关性排序。",
+      "avoid": "只依据既有“初步诊断”四字得出已经确诊。",
+      "relation_types": [
+        "supports",
+        "limits",
+        "hypothesis"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD02",
+      "section": "diagnostic_discussion",
+      "title": "反证和缺失不可混同",
+      "tags": [
+        "general",
+        "negation",
+        "reasoning"
+      ],
+      "trigger_keywords": [
+        "缺失",
+        "不足",
+        "未提供",
+        "排除"
+      ],
+      "priority": 5,
+      "writing_rule": "明确反证必须由存在的阴性或不符检查支持；未检查/未提供仅表示证据不足。“原始资料尚不足以排除…”优于“无…”。",
+      "avoid": "把阴性缺失的缺位当作疾病不存在。",
+      "relation_types": [
+        "contradicts",
+        "missing_discriminator"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD03",
+      "section": "diagnostic_discussion",
+      "title": "鉴别项目有筛选理由",
+      "tags": [
+        "general",
+        "reasoning"
+      ],
+      "trigger_keywords": [
+        "鉴别",
+        "待排",
+        "疑似"
+      ],
+      "priority": 4,
+      "writing_rule": "优先写2–3个能改变判断的鉴别，每个说明“为什么考虑—目前限制—哪条资料有区分力”；材料不足时可少于2个。",
+      "avoid": "为凑篇幅罗列罕见病和教科书定义。",
+      "relation_types": [
+        "differentiates",
+        "plan_for"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD04",
+      "section": "diagnostic_discussion",
+      "title": "初步诊断与待排边界",
+      "tags": [
+        "general",
+        "certainty"
+      ],
+      "trigger_keywords": [
+        "初步诊断",
+        "待排",
+        "疑似",
+        "考虑"
+      ],
+      "priority": 5,
+      "writing_rule": "对原资料列出的初步诊断写“入院诊断记录为…，结合…可考虑…，仍需…核实”；模型新增归纳标为推断。",
+      "avoid": "把来源中的“待查”“拟排除”改写成确诊。",
+      "relation_types": [
+        "documented_as",
+        "requires_review"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD05",
+      "section": "diagnostic_discussion",
+      "title": "时间趋势只能在匹配指标下比较",
+      "tags": [
+        "general",
+        "numeric",
+        "timeline"
+      ],
+      "trigger_keywords": [
+        "升高",
+        "下降",
+        "好转",
+        "变化"
+      ],
+      "priority": 5,
+      "writing_rule": "比较数值前核对指标相同、单位相同、日期正确；无法确定趋势时写“已见不同时间结果，需结合复查判断”。",
+      "avoid": "将不同场所/不同指标的数据误报为同一指标持续升高。",
+      "relation_types": [
+        "trend",
+        "observed_at"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD06",
+      "section": "diagnostic_discussion",
+      "title": "症状病因与风险分开",
+      "tags": [
+        "cardiology",
+        "neurology",
+        "general"
+      ],
+      "trigger_keywords": [
+        "胸痛",
+        "TIA",
+        "卒中",
+        "胸闷",
+        "神经"
+      ],
+      "priority": 4,
+      "writing_rule": "分别说明当前症状的可能机制、鉴别与潜在风险，不能由危险因素直接推断当前急性病事件已发生。",
+      "avoid": "有危险因素就确定急性冠脉综合征或脑梗死。",
+      "relation_types": [
+        "risk_modifier",
+        "hypothesis"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "DD07",
+      "section": "diagnostic_discussion",
+      "title": "共存疾病影响当前决策",
+      "tags": [
+        "general",
+        "multimorbidity"
+      ],
+      "trigger_keywords": [
+        "多病共存",
+        "并存",
+        "用药",
+        "肾功能"
+      ],
+      "priority": 3,
+      "writing_rule": "以“本次问题—共病影响—需核对的治疗/检查约束”关联共病，不把所有共病都写成主诊断。",
+      "avoid": "把共病全部视为已导致当前症状。",
+      "relation_types": [
+        "risk_modifier",
+        "modifies_plan"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "PL01",
+      "section": "plan",
+      "title": "计划逐项回应待解决问题",
+      "tags": [
+        "general",
+        "plan"
+      ],
+      "trigger_keywords": [
+        "复查",
+        "完善",
+        "进一步",
+        "观察",
+        "拟"
+      ],
+      "priority": 5,
+      "writing_rule": "计划按“当前问题—检查/核实—监测—依据结果调整”排列；每项能回指诊断中一个待解决问题。",
+      "avoid": "“完善相关检查、对症治疗”空泛套话。",
+      "relation_types": [
+        "plan_for",
+        "monitors"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "PL02",
+      "section": "plan",
+      "title": "严格区分事实状态与计划状态",
+      "tags": [
+        "general",
+        "status"
+      ],
+      "trigger_keywords": [
+        "已完成",
+        "拟",
+        "待",
+        "继续",
+        "计划"
+      ],
+      "priority": 5,
+      "writing_rule": "原有医嘱、正在实施和模型新增建议必须分开；新增建议使用“可考虑/建议结合临床判断”，不写成已经执行。",
+      "avoid": "不知现用药却写“继续既往所有药物”；计划结果写成已有结果。",
+      "relation_types": [
+        "planned_for",
+        "performed_at"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "PL03",
+      "section": "plan",
+      "title": "检查须说清要解决什么",
+      "tags": [
+        "general",
+        "diagnostics"
+      ],
+      "trigger_keywords": [
+        "影像",
+        "化验",
+        "检查",
+        "监护"
+      ],
+      "priority": 5,
+      "writing_rule": "把检查与具体目标连接：“核实…以区分…/评估…变化/观察…”，频次或药量需有原文依据或明确由医生决定。",
+      "avoid": "编造具体复查频次、医嘱、药物剂量。",
+      "relation_types": [
+        "differentiates",
+        "plan_for"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "PL04",
+      "section": "plan",
+      "title": "急性风险的谨慎表达",
+      "tags": [
+        "cardiology",
+        "neurology",
+        "safety"
+      ],
+      "trigger_keywords": [
+        "新发",
+        "胸痛",
+        "一过性",
+        "急性",
+        "危险"
+      ],
+      "priority": 5,
+      "writing_rule": "若资料显示可能存在需要及时评估的风险，建议由临床医生及时评估并根据实际检查决定处置；避免凭不足证据直接给出高风险药物/侵入操作决定。",
+      "avoid": "用范例给当前患者直接套用治疗方案。",
+      "relation_types": [
+        "risk_modifier",
+        "requires_review"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "PL05",
+      "section": "plan",
+      "title": "既有药物与依从性",
+      "tags": [
+        "cardiology",
+        "medication"
+      ],
+      "trigger_keywords": [
+        "阿司匹林",
+        "氯吡格雷",
+        "漏服",
+        "抗凝"
+      ],
+      "priority": 5,
+      "writing_rule": "明确写出原始记录中的用药与依从性不确定性；计划以核对实际药物、剂量、时序及医疗评估为目标。",
+      "avoid": "根据示例自动调整抗栓药物剂量或指示停药。",
+      "relation_types": [
+        "reported_by",
+        "requires_review"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "EV01",
+      "section": "evidence",
+      "title": "关键事实引用必须直达当前病例来源",
+      "tags": [
+        "general",
+        "provenance"
+      ],
+      "trigger_keywords": [
+        "source_id",
+        "依据",
+        "来源",
+        "evidence"
+      ],
+      "priority": 5,
+      "writing_rule": "fact 只表示原资料明确记载；来源编号仅来自本病例；值、单位、时间与来源共同一致。",
+      "avoid": "引用示例库、医学指南或图得分作为当前患者 source_id。",
+      "relation_types": [
+        "derived_from"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "EV02",
+      "section": "evidence",
+      "title": "推断标识有证据锚点",
+      "tags": [
+        "general",
+        "reasoning"
+      ],
+      "trigger_keywords": [
+        "推断",
+        "鉴别",
+        "待排"
+      ],
+      "priority": 5,
+      "writing_rule": "inference 必须由至少一条当前病例 Source 支持，且在 statement 保留不确定性；不可伪装为来源明示事实。",
+      "avoid": "把常识阈值写成患者实测值。",
+      "relation_types": [
+        "supports",
+        "inference_from"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "EV03",
+      "section": "evidence",
+      "title": "控制数量且覆盖主要问题",
+      "tags": [
+        "general",
+        "coverage"
+      ],
+      "trigger_keywords": [
+        "evidence",
+        "依据"
+      ],
+      "priority": 4,
+      "writing_rule": "优先选3–5条互补关键依据，兼顾主要阳性、重要阴性或限制、最关键推断；不足时宁少勿造。",
+      "avoid": "凑5条重复同一检查、缺乏不同来源层次。",
+      "relation_types": [
+        "covers_problem"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "RV01",
+      "section": "review_items",
+      "title": "缺失项与矛盾项分列",
+      "tags": [
+        "general",
+        "missing"
+      ],
+      "trigger_keywords": [
+        "待核",
+        "缺失",
+        "未提供",
+        "复查"
+      ],
+      "priority": 5,
+      "writing_rule": "写“某结果在当前 sources 中未提供/两条陈述不一致，需核对”，避免“未做”“正常”。",
+      "avoid": "为展示谨慎而大量列出和本例无关的检查。",
+      "relation_types": [
+        "missing_discriminator",
+        "conflicts_with"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "RV02",
+      "section": "review_items",
+      "title": "待核事项应可执行",
+      "tags": [
+        "general",
+        "plan"
+      ],
+      "trigger_keywords": [
+        "确认",
+        "复核",
+        "待查"
+      ],
+      "priority": 4,
+      "writing_rule": "每个待核条目应指向具体信息：时间、数值、检查结果、执行状态、病史可靠性或临床判断。",
+      "avoid": "“请医生复核本文全部内容”等泛泛表述。",
+      "relation_types": [
+        "requires_review"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "SP01",
+      "section": "specialty",
+      "title": "冠脉介入后胸痛写法",
+      "tags": [
+        "cardiology",
+        "PCI",
+        "chest_pain"
+      ],
+      "trigger_keywords": [
+        "PCI",
+        "支架",
+        "胸痛",
+        "冠脉",
+        "球囊"
+      ],
+      "priority": 5,
+      "writing_rule": "优先保留多次介入的部位与日期、疼痛频次和静息/活动关系、抗血小板依从性、心电图及心肌损伤指标的有无结果。只能针对当前证据讨论可能性。",
+      "avoid": "凭病史自动断定支架血栓形成/再狭窄、发明心肌酶数值。",
+      "relation_types": [
+        "performed_at",
+        "risk_modifier",
+        "missing_discriminator"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "SP02",
+      "section": "specialty",
+      "title": "短暂神经症状待排写法",
+      "tags": [
+        "neurology",
+        "TIA"
+      ],
+      "trigger_keywords": [
+        "TIA",
+        "短暂",
+        "无力",
+        "言语不清",
+        "偏瘫"
+      ],
+      "priority": 5,
+      "writing_rule": "强调发作起止时间、局灶症状、是否完全恢复、血糖和影像是否有结果、心律及血管危险因素；保留TIA待排性质。",
+      "avoid": "症状已恢复就断定TIA，或无影像就声称已排除脑梗死。",
+      "relation_types": [
+        "observed_at",
+        "requires_review"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "SP03",
+      "section": "specialty",
+      "title": "妊娠瘙痒与肝检验异常写法",
+      "tags": [
+        "obstetrics",
+        "ICP",
+        "GDM"
+      ],
+      "trigger_keywords": [
+        "孕周",
+        "瘙痒",
+        "胆汁酸",
+        "ALT",
+        "OGTT"
+      ],
+      "priority": 5,
+      "writing_rule": "分开记录孕周、瘙痒特点、胆汁酸/肝酶时间序列、胎儿监测结果及糖代谢管理资料；不要把待复查写成已有结果。",
+      "avoid": "从单次数值直接确定疾病分级，或推测胎儿风险已出现。",
+      "relation_types": [
+        "trend",
+        "plan_for",
+        "observed_at"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "SP04",
+      "section": "specialty",
+      "title": "贫血与肾功能异常写法",
+      "tags": [
+        "renal",
+        "anemia"
+      ],
+      "trigger_keywords": [
+        "贫血",
+        "血红蛋白",
+        "肌酐",
+        "肾功能",
+        "水肿"
+      ],
+      "priority": 5,
+      "writing_rule": "描述症状—Hb值—肾功能值，指出失血证据、肾功能基线及尿检等信息是否真正有结果；病因关系保持待查。",
+      "avoid": "依据单次肌酐自动诊断慢性肾病，或将贫血直接归为肾性。",
+      "relation_types": [
+        "supports",
+        "missing_discriminator"
+      ],
+      "source_role": "writing_guidance_only"
+    },
+    {
+      "id": "SP05",
+      "section": "specialty",
+      "title": "慢性多病共存的写法",
+      "tags": [
+        "geriatrics",
+        "multimorbidity"
+      ],
+      "trigger_keywords": [
+        "老年",
+        "多病",
+        "合并",
+        "慢性病"
+      ],
+      "priority": 3,
+      "writing_rule": "把共存疾病按影响本次诊断的程度分层；优先讨论用药、基础功能、病情可靠性和检查状态的相互约束。",
+      "avoid": "对每个共病重复一段教科书诊断。",
+      "relation_types": [
+        "risk_modifier",
+        "modifies_plan"
+      ],
+      "source_role": "writing_guidance_only"
+    }
+  ]
+}

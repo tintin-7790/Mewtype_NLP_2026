@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from copy import deepcopy
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -13,6 +14,7 @@ from .claim_extractor import extract_claims
 from .errors import CaseError
 from .model_client import Budget, REVISER_SCHEMA, parse_model_json
 from .protocol import Case
+from .prompt_profiles import load_clinical_prompt
 from .validation import validate_record
 
 
@@ -23,7 +25,9 @@ TECHNICAL_REVIEW_TERMS = ("JSON", "API", "模型", "解析", "自动核验", "�
 
 def run_local_revision(case: Case, record: dict, clinical_plan: dict, issues: list[dict],
                        retriever, retrieval_top_k: int, client, response_format: str,
-                       budget: Budget) -> tuple[dict, dict]:
+                       budget: Budget, prompt_profile: str = "contrastive",
+                       prompt_audit: dict | None = None) -> tuple[dict, dict]:
+    preparation_started = time.perf_counter()
     claim_map = {claim["claim_id"]: claim for claim in extract_claims(record)}
     target_ids = {issue["claim_id"] for issue in issues}
     if any(claim_id not in claim_map for claim_id in target_ids):
@@ -53,7 +57,16 @@ def run_local_revision(case: Case, record: dict, clinical_plan: dict, issues: li
                             for claim_id in sorted(target_ids)],
         "retrieval_candidates": retrieval,
     }
-    raw = client.call(_messages("revise_system.txt", payload), response_format, budget,
+    system, _ = load_clinical_prompt("reviser", prompt_profile, "")
+    if prompt_audit is not None:
+        prompt_audit["reviser"] = {
+            "profile": prompt_profile,
+            "system_prompt_chars": len(system),
+            "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
+            "facts_authority": "raw_sources_only",
+            "preparation_elapsed_ms": round((time.perf_counter() - preparation_started) * 1000, 3),
+        }
+    raw = client.call(_messages_from_system(system, payload), response_format, budget,
                       stage="reviser", schema=REVISER_SCHEMA)
     revision = parse_model_json(raw, stage="reviser", client=client)
     try:
@@ -301,6 +314,11 @@ def _fallback_text(error_type: str | None) -> str:
 
 def _messages(prompt_name: str, payload: dict) -> list[dict]:
     system = (BASE_DIR / "prompts" / prompt_name).read_text(encoding="utf-8")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+
+def _messages_from_system(system: str, payload: dict) -> list[dict]:
     return [{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 

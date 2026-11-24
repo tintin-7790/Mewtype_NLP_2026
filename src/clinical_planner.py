@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 
 from .errors import CaseError
@@ -30,6 +31,7 @@ def compact_facts_for_prompt(facts: list[dict]) -> list[dict]:
 
 def run_planner(case: Case, facts: list[dict], client, response_format: str, budget: Budget,
                 prompt_profile: str = "contrastive", prompt_audit: dict | None = None) -> dict:
+    preparation_started = time.perf_counter()
     payload = {
         "record_cutoff": case.record_cutoff,
         "sources": [{"source_id": source.source_id, "field_path": source.field_path,
@@ -42,7 +44,10 @@ def run_planner(case: Case, facts: list[dict], client, response_format: str, bud
     system, example_id = load_clinical_prompt("planner", prompt_profile, case_text)
     if prompt_audit is not None:
         prompt_audit["planner"] = {"profile": prompt_profile, "fewshot_example_id": example_id,
-                                   "system_prompt_chars": len(system)}
+                                   "system_prompt_chars": len(system),
+                                   "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
+                                   "preparation_elapsed_ms": round(
+                                       (time.perf_counter() - preparation_started) * 1000, 3)}
     messages = _messages(system, payload)
     raw = client.call(messages, response_format, budget, stage="planner", schema=PLANNER_SCHEMA)
     plan = parse_model_json(raw, stage="planner", client=client)

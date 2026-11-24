@@ -1,0 +1,110 @@
+{
+  "version": "2026-11-24.original-v1",
+  "description": "Illustrative same-case shared-decision-card records, based only on original synthetic case sources.",
+  "cards": [
+    {
+      "example_id": "SYN_CARDIO_001",
+      "problem_id": "PR01",
+      "name": "反复胸痛原因待评估",
+      "supporting_source_ids": [
+        "S01",
+        "S02"
+      ],
+      "limiting_source_ids": [
+        "S05"
+      ],
+      "uncertain_source_ids": [
+        "S03"
+      ],
+      "counter_issue": "心电图部分T波低平并不特异；心肌损伤标志物未提供",
+      "missing_discriminators": [
+        "心肌损伤标志物结果",
+        "原始PCI资料",
+        "用药依从性详情"
+      ],
+      "plan_goal_ids": [
+        "核实高风险症状并检查",
+        "核实术后用药"
+      ],
+      "verdict": "possible_not_confirmed"
+    },
+    {
+      "example_id": "SYN_NEURO_001",
+      "problem_id": "PR01",
+      "name": "短暂局灶神经症状待排",
+      "supporting_source_ids": [
+        "S01",
+        "S02"
+      ],
+      "limiting_source_ids": [
+        "S04"
+      ],
+      "uncertain_source_ids": [
+        "S05"
+      ],
+      "counter_issue": "缓解不等于TIA已经确诊；缺少影像/血糖资料",
+      "missing_discriminators": [
+        "影像",
+        "血糖",
+        "抗凝情况"
+      ],
+      "plan_goal_ids": [
+        "及时评估",
+        "区分缺血及模拟因素"
+      ],
+      "verdict": "rule_out"
+    },
+    {
+      "example_id": "SYN_OBS_001",
+      "problem_id": "PR01",
+      "name": "孕期瘙痒伴肝检验异常",
+      "supporting_source_ids": [
+        "S01",
+        "S02"
+      ],
+      "limiting_source_ids": [
+        "S05"
+      ],
+      "uncertain_source_ids": [
+        "S04"
+      ],
+      "counter_issue": "复查不能推定ALT与胆汁酸同向变化；不可自行诊断分级",
+      "missing_discriminators": [
+        "当前肝功能结果",
+        "其他肝胆原因评估"
+      ],
+      "plan_goal_ids": [
+        "动态复核异常",
+        "评估母胎状态"
+      ],
+      "verdict": "possible_not_confirmed"
+    },
+    {
+      "example_id": "SYN_RENAL_001",
+      "problem_id": "PR01",
+      "name": "贫血与肾功能异常原因待查",
+      "supporting_source_ids": [
+        "S01",
+        "S02"
+      ],
+      "limiting_source_ids": [
+        "S03"
+      ],
+      "uncertain_source_ids": [
+        "S04"
+      ],
+      "counter_issue": "单次肌酐和Hb不足以确定慢性肾病或肾性贫血的因果关系",
+      "missing_discriminators": [
+        "既往肾功能基线",
+        "红细胞指数",
+        "尿检"
+      ],
+      "plan_goal_ids": [
+        "明确贫血类型",
+        "评估肾功能变化"
+      ],
+      "verdict": "possible_not_confirmed"
+    }
+  ],
+  "safety": "Not real patient data. Never merge IDs across cases."
+}

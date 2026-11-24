@@ -1,4 +1,4 @@
-"""Prompt profile loading with at most one synthetic few-shot per stage."""
+"""Stage-aware clinical prompt profiles without changing stage schemas."""
 
 from __future__ import annotations
 
@@ -7,19 +7,33 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-PROFILES = {"legacy", "contrastive", "contrastive_fewshot"}
+PROFILES = {"legacy", "contrastive", "contrastive_fewshot", "contrastive_v2"}
+STAGES = {"planner", "counter_evidence", "writer", "verifier", "reviser"}
+_STAGE_FILES = {
+    "planner": "planner_system.txt",
+    "counter_evidence": "counter_evidence_system.txt",
+    "writer": "writer_system.txt",
+    "verifier": "claim_verify_system.txt",
+    "reviser": "revise_system.txt",
+}
+
+
+def resolve_clinical_prompt_path(stage: str, profile: str) -> Path:
+    if profile not in PROFILES:
+        raise ValueError(f"unknown prompt profile: {profile}")
+    if stage not in STAGES:
+        raise ValueError(f"unsupported prompt stage: {stage}")
+    filename = _STAGE_FILES[stage]
+    if profile == "contrastive_v2":
+        return BASE_DIR / "prompts" / "contrastive_v2" / filename
+    if profile == "legacy" and stage in ("planner", "writer"):
+        return BASE_DIR / "prompts" / "archive" / "clinical-v1" / filename
+    return BASE_DIR / "prompts" / filename
 
 
 def load_clinical_prompt(stage: str, profile: str, case_text: str) -> tuple[str, str | None]:
-    if profile not in PROFILES:
-        raise ValueError(f"unknown prompt profile: {profile}")
-    if stage not in ("planner", "writer"):
-        raise ValueError(f"unsupported prompt stage: {stage}")
-    if profile == "legacy":
-        path = BASE_DIR / "prompts" / "archive" / "clinical-v1" / f"{stage}_system.txt"
-        return path.read_text(encoding="utf-8"), None
-    prompt = (BASE_DIR / "prompts" / f"{stage}_system.txt").read_text(encoding="utf-8")
-    if profile != "contrastive_fewshot":
+    prompt = resolve_clinical_prompt_path(stage, profile).read_text(encoding="utf-8")
+    if profile != "contrastive_fewshot" or stage not in ("planner", "writer"):
         return prompt, None
     library_path = BASE_DIR / "prompts" / "fewshot" / f"{stage}_examples.json"
     library = json.loads(library_path.read_text(encoding="utf-8"))

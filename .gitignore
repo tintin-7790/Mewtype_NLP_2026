@@ -22,12 +22,15 @@ checkpoints/
 adapters/
 
 # Generated outputs, logs, and submission archives
+input.json
 output.json
 run_log.json
 baseline_output.json
 baseline_run_log.json
 clinical_output*.json
 clinical_run_log*.json
+*_log.json
 *_raw_response*.json
+*.json.backup.*
 *.log
 *.zip

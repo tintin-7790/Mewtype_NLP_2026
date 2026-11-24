@@ -1,0 +1,57 @@
+{
+  "version": "2026-11-24.v1",
+  "purpose": "Writer self-check and evaluation; not a source of patient facts",
+  "dimensions": [
+    {
+      "id": "fact_accuracy",
+      "name": "事实准确",
+      "importance": 5,
+      "check": "原文数值单位时间、阳性/明确阴性、不同来源可靠性均正确"
+    },
+    {
+      "id": "problem_specificity",
+      "name": "病例个体化",
+      "importance": 4,
+      "check": "病程变化、特异性检查、共病、检查/用药信息贴合当前病例"
+    },
+    {
+      "id": "diagnostic_reasoning",
+      "name": "拟诊与鉴别",
+      "importance": 5,
+      "check": "每个主要判断有正向依据/明确反证或证据局限/必要鉴别"
+    },
+    {
+      "id": "plan_alignment",
+      "name": "计划针对性",
+      "importance": 5,
+      "check": "计划和本例问题逐项对应且区分已完成与建议"
+    },
+    {
+      "id": "evidence_provenance",
+      "name": "来源说明",
+      "importance": 5,
+      "check": "3–5条互补事实/推断，Source ID真实存在、陈述与来源一致"
+    },
+    {
+      "id": "review_items",
+      "name": "待核事项",
+      "importance": 5,
+      "check": "缺失及冲突确有依据、不把未提供当未做"
+    },
+    {
+      "id": "structure",
+      "name": "三段完整",
+      "importance": 3,
+      "check": "三段完整不套话、不重复病史"
+    }
+  ],
+  "critical_errors": [
+    "伪造检验数值或单位",
+    "混淆症状及医疗事件日期",
+    "明确否定被误写为阳性或相反",
+    "将计划写成已经完成",
+    "将疑似/待排升级为确诊",
+    "不安全且无证据基础的确定性治疗建议"
+  ],
+  "comment": "自拟研究检查表，非赛事官方逐项给分标准；请勿声称该分数为赛事分数。"
+}

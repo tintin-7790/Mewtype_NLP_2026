@@ -71,6 +71,24 @@ class ProblemContextTests(unittest.TestCase):
         self.assertNotIn("facts", payload)
         self.assertNotIn("evidence_bundles", payload)
 
+    def test_graph_reranked_candidate_reaches_writer_context(self):
+        client = CaptureClient()
+        case = Case("C", "T0", [Source("S2", "白细胞升高至12.5×10⁹/L", "辅助检查")])
+        bundles = [{"problem_id": "PR001", "planner_query": "感染",
+                    "query": "感染｜相关患者事实 白细胞升高",
+                    "candidates": [{"source_id": "S2", "field_path": "辅助检查",
+                        "text": "白细胞升高至12.5×10⁹/L", "similarity": 0.82,
+                        "ranking_score": 0.91, "graph_relevance": 1.0,
+                        "graph_strategy": "ppr", "compatible": True,
+                        "compatibility_warnings": [], "case_id": "C", "time": None,
+                        "assertion": "positive", "status": "unknown", "ordinal": 0}]}]
+        run_note_writer(case, self.facts, self.plan, bundles, client, "text", Budget(1), 5)
+        payload = json.loads(client.messages[1]["content"])
+        candidate = payload["problem_evidence_context"]["problems"][0]["retrieval_evidence"][0]["candidates"][0]
+        self.assertEqual(candidate["graph_strategy"], "ppr")
+        self.assertEqual(candidate["source_id"], "S2")
+        self.assertEqual(candidate["ranking_score"], 0.91)
+
     def test_problem_context_does_not_repeat_same_long_fact_text(self):
         long_text = "重要影像异常" * 80
         self.facts[1]["fact_text"] = long_text

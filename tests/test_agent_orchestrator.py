@@ -74,12 +74,21 @@ class AgentOrchestratorTests(unittest.TestCase):
         facts=[{"fact_id":"F001","source_id":"S1","field_path":"现病史",
                 "fact_text":"患者发热伴咳嗽。","time":None,"value":None,"unit":None,
                 "assertion":"positive","status":"unknown","correction":None}]
-        review=run_counter_evidence_agent(case,facts,_planner(),client,"json_schema",Budget(1))
+        retrieval_bundles = [{"problem_id": "PR001", "planner_query": "发热 咳嗽",
+            "candidates": [{"source_id": "S1", "field_path": "现病史", "text": "患者发热伴咳嗽。",
+                "similarity": 0.91, "ranking_score": 0.88, "graph_relevance": 0.75,
+                "graph_strategy": "ppr", "compatible": True}]}]
+        review=run_counter_evidence_agent(case,facts,_planner(),client,"json_schema",Budget(1),
+                                          retrieval_bundles)
         payload=json.loads(client.messages[1]["content"])
         self.assertEqual(review["issues"],[])
         self.assertNotIn("content",payload["source_catalog"][0])
         self.assertEqual(payload["facts"][0]["fact_text"],"患者发热伴咳嗽。")
         self.assertNotIn("clinical_plan",payload)
+        candidate = payload["retrieval_evidence"][0]["candidates"][0]
+        self.assertEqual(candidate["fact_ids"], ["F001"])
+        self.assertEqual(candidate["graph_strategy"], "ppr")
+        self.assertEqual(candidate["source_id"], "S1")
         self.assertTrue(client.call_events[-1]["schema_validation_success"])
 
     def test_always_agent_and_graph_retrieval_are_logged(self):
@@ -103,7 +112,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                          "--pipeline", "clinical_pipeline", "--clinical-verification", "off",
                          "--clinical-revision", "off", "--clinical-agents", "always",
                          "--counter-evidence-response-format", "json_schema",
-                         "--retrieval-config", str(retrieval), "--graph-retrieval", "one_hop"])
+                         "--retrieval-config", str(retrieval), "--graph-retrieval", "ppr"])
             saved = json.loads(log.read_text(encoding="utf-8"))
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output.read_text())[0]["status"], "success")
@@ -115,7 +124,15 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertTrue(clinical["adaptive_agent"]["completed"])
             self.assertEqual(clinical["adaptive_agent"]["reviewed_problem_count"], 1)
             self.assertEqual(clinical["adaptive_agent"]["issue_count"], 1)
-            self.assertEqual(clinical["graph_retrieval"]["mode"], "one_hop")
+            self.assertEqual(clinical["adaptive_agent"]["retrieval_bundle_count"], 1)
+            self.assertGreater(clinical["adaptive_agent"]["retrieval_candidate_count"], 0)
+            self.assertEqual(clinical["graph_retrieval"]["mode"], "ppr")
+            self.assertTrue(clinical["graph_retrieval"]["graph_requested"])
+            self.assertTrue(clinical["graph_retrieval"]["graph_executed"])
+            self.assertIsNone(clinical["graph_retrieval"]["graph_fallback_reason"])
+            self.assertEqual(clinical["graph_retrieval"]["embedding_provider"], "MockEmbeddingClient")
+            self.assertTrue(clinical["graph_retrieval"]["seed_fact_ids"])
+            self.assertTrue(clinical["graph_retrieval"]["selected_source_ids"])
             self.assertGreater(clinical["graph_retrieval"]["graph"]["node_count"], 0)
 
     def test_invalid_optional_agent_review_does_not_block_writer(self):

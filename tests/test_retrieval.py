@@ -1,6 +1,9 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from src.embedding_client import MockEmbeddingClient, OfficialEmbeddingClient
+from src.embedding_client import MockEmbeddingClient, OfficialEmbeddingClient, load_embedding_client
 from src.errors import TaskError
 from src.protocol import Case, Source
 from src.retrieval import DenseEvidenceRetriever, build_retrieval_units
@@ -84,6 +87,14 @@ class RetrievalTests(unittest.TestCase):
         with self.assertRaises(TaskError) as caught:
             OfficialEmbeddingClient().embed(["test"])
         self.assertEqual(caught.exception.code, "OFFICIAL_EMBEDDING_PROTOCOL_PENDING")
+
+    def test_official_config_rejects_unpublished_http_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "retrieval.json"
+            path.write_text(json.dumps({"provider": "official", "endpoint": "invented"}), encoding="utf-8")
+            with self.assertRaises(TaskError) as caught:
+                load_embedding_client(path, "competition")
+        self.assertEqual(caught.exception.code, "OFFICIAL_EMBEDDING_CONFIG_UNPUBLISHED")
 
 
 if __name__ == "__main__":

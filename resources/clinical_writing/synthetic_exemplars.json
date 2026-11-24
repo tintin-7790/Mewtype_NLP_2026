@@ -1,0 +1,457 @@
+{
+  "version": "2026-11-24.original-v1",
+  "licensing": "Original synthetic educational examples written for this deliverable; no copied patient records",
+  "patient_data": "NONE_REAL",
+  "copyright_note": "Examples are original and shall not be treated as patient facts for any real case.",
+  "examples": [
+    {
+      "id": "SYN_CARDIO_001",
+      "type": "ORIGINAL_SYNTHETIC",
+      "department": "心血管内科",
+      "tags": [
+        "cardiology",
+        "chest_pain",
+        "PCI",
+        "medication",
+        "timeline"
+      ],
+      "case": {
+        "case_id": "SYN_CARDIO_001",
+        "record_cutoff": "T0",
+        "sources": [
+          {
+            "source_id": "S01",
+            "content": "58岁男性，因近3周反复胸骨后闷痛就诊；由起初每周约1次变为近5天每日发作，偶在休息时出现，通常持续5至8分钟后自行缓解。"
+          },
+          {
+            "source_id": "S02",
+            "content": "既往2025-10-09行前降支支架植入；2026-02-12行右冠支架植入；手术记录仅提供上述日期和部位。"
+          },
+          {
+            "source_id": "S03",
+            "content": "患者称术后服用阿司匹林与氯吡格雷，但近2个月曾间断漏服；家属所述漏服频次与患者不一致。"
+          },
+          {
+            "source_id": "S04",
+            "content": "本次就诊时无持续胸痛，血压126/78mmHg，心率68次/分。"
+          },
+          {
+            "source_id": "S05",
+            "content": "2026-10-10就诊心电图记录为窦性心律、部分导联T波低平。心肌损伤标志物结果未提供，拟进一步评估。"
+          }
+        ]
+      },
+      "medical_record": {
+        "case_features": "58岁男性，既往两次冠脉介入治疗（2025-10-09前降支支架植入，2026-02-12右冠支架植入）。近3周再发胸骨后闷痛，近5天由间歇发作进展为每日发作，部分发生于休息时，持续约5至8分钟后缓解。自述近2个月抗血小板药物间断漏服，患者与家属关于频次的陈述不一致。本次就诊时未持续胸痛，血压126/78mmHg、心率68次/分；2026-10-10心电图记录部分导联T波低平，尚未提供心肌损伤标志物结果。",
+        "diagnostic_discussion": "本次反复胸痛需结合冠心病及既往PCI史重点评估冠脉缺血相关可能：发作频次增加、休息时亦可出现，以及抗血小板药物依从性不确定，是需要重视的病例特征。但现有心电图信息缺乏特异性，未见心肌损伤标志物结果，尚不能仅凭病史确认具体急性冠脉事件，也不能据此判定支架内再狭窄或血栓形成。鉴别时需结合后续客观检查判断其他心源性及非心源性胸痛原因；目前已有资料不足以对各方向作确定排除。两次介入的日期与血管部位应分别保留，避免将不同操作合并成同一次治疗。",
+        "plan": "建议由临床医生结合目前症状和风险及时评估是否需要动态心电图及心肌损伤标志物等检查，并核实发作时症状及其变化。核对原始冠脉介入记录、实际抗血小板用药方案及漏服时间，与患者及家属澄清不一致陈述。后续检查、进一步介入评估和治疗调整由负责医生根据实际证据决定；持续观察症状频次、持续时间及相关危险信号，不能将拟完善的检查写成既有结果。",
+        "evidence": [
+          {
+            "statement": "近期胸痛发作频次增加且部分于休息时出现。",
+            "source_ids": [
+              "S01"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "有两次冠脉支架植入史，日期与部位不同。",
+            "source_ids": [
+              "S02"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "抗血小板药物存在自述漏服且陈述不一致。",
+            "source_ids": [
+              "S03"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "冠脉缺血相关病因需要进一步评估，尚不能据资料确认具体事件。",
+            "source_ids": [
+              "S01",
+              "S02",
+              "S05"
+            ],
+            "kind": "inference"
+          }
+        ],
+        "review_items": [
+          "心肌损伤标志物及动态检查结果未提供",
+          "PCI原始报告、病变及处理细节需核实",
+          "抗血小板药物实际依从性与患者家属陈述存在差异"
+        ]
+      },
+      "evidence_links": [
+        {
+          "fact_source_ids": [
+            "S01",
+            "S02"
+          ],
+          "relationship": "supports",
+          "to": "缺血相关胸痛待评估",
+          "note": "既往血管史与近期症状共同增加关注度，但不等于确诊"
+        },
+        {
+          "fact_source_ids": [
+            "S05"
+          ],
+          "relationship": "missing_discriminator",
+          "to": "急性事件确认",
+          "note": "缺乏心肌损伤指标结果"
+        },
+        {
+          "fact_source_ids": [
+            "S03"
+          ],
+          "relationship": "requires_review",
+          "to": "用药依从性",
+          "note": "家属及患者陈述冲突"
+        }
+      ],
+      "style_takeaways": [
+        "先写症状频次变化，再交代两次PCI具体时间部位",
+        "把自述的漏服与客观检查分层",
+        "诊断讨论承认缺少决定性检查",
+        "计划与具体待核事实一一对应"
+      ],
+      "allowed_usage": "manual_quality_review_and_style_study_only"
+    },
+    {
+      "id": "SYN_NEURO_001",
+      "type": "ORIGINAL_SYNTHETIC",
+      "department": "神经内科",
+      "tags": [
+        "neurology",
+        "TIA",
+        "timeline",
+        "geriatrics"
+      ],
+      "case": {
+        "case_id": "SYN_NEURO_001",
+        "record_cutoff": "T0",
+        "sources": [
+          {
+            "source_id": "S01",
+            "content": "72岁女性，2026-09-11上午突然出现右上肢无力伴言语含糊，家属称约12分钟后恢复，入院询问时无持续上述症状。"
+          },
+          {
+            "source_id": "S02",
+            "content": "既往有高血压及阵发性心房颤动病史，但现行抗凝方案未提供。"
+          },
+          {
+            "source_id": "S03",
+            "content": "到院血压158/88mmHg，清醒，查体记录四肢肌力对称。"
+          },
+          {
+            "source_id": "S04",
+            "content": "头颅影像、血管检查、当次血糖及心电监测结果尚未提供；门诊拟进一步检查。"
+          },
+          {
+            "source_id": "S05",
+            "content": "病历初步诊断记录：“短暂性脑缺血发作待排”。"
+          }
+        ]
+      },
+      "medical_record": {
+        "case_features": "72岁女性，于2026-09-11上午突发右上肢无力及言语含糊，家属述约12分钟后自行恢复，入院询问时无持续性症状。既往高血压及阵发性房颤，当前抗凝方案未提供。到院血压158/88mmHg，查体四肢肌力对称。当前资料尚未提供头颅影像、血管检查、当次血糖及心电监测结果；病历初步诊断为短暂性脑缺血发作待排。",
+        "diagnostic_discussion": "突然出现并短时恢复的局灶性神经症状，使脑血管缺血相关原因成为重要鉴别方向；房颤及高血压史是临床评估时应考虑的背景因素。但“症状已缓解”不能单独证明TIA，也不能据此排除已发生脑组织损伤或其他模拟病因。现有资料缺少影像和当次血糖等关键结果，无法确定事件性质，临床记录应保留待排状态。若考虑代谢性或其他模拟性原因，应通过相应客观资料进行区分，不能以未提及某些症状作为明确阴性证据。",
+        "plan": "建议及时由临床医生评估短暂神经功能异常的风险，核实症状准确起止、是否再发及当前神经系统变化；根据评估完善或核对脑部影像、血管检查、当次血糖、心律及用药资料。明确现行抗凝方案和依从性，结合实际检查结果再判断诊断和后续治疗。原资料仅记载“拟检查”，不可写成已经完成。",
+        "evidence": [
+          {
+            "statement": "患者出现短暂右上肢无力与言语含糊，随后恢复。",
+            "source_ids": [
+              "S01"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "既往有高血压和阵发性房颤，抗凝方案未提供。",
+            "source_ids": [
+              "S02"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "影像、血糖等关键检查结果尚未提供。",
+            "source_ids": [
+              "S04"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "当前短暂神经症状的病因尚不能凭所给资料确诊。",
+            "source_ids": [
+              "S01",
+              "S04",
+              "S05"
+            ],
+            "kind": "inference"
+          }
+        ],
+        "review_items": [
+          "发作时间及恢复经过需进一步向目击者核实",
+          "头颅影像、血管检查和当次血糖结果未提供",
+          "现行抗凝药物及依从性未提供"
+        ]
+      },
+      "evidence_links": [
+        {
+          "fact_source_ids": [
+            "S01"
+          ],
+          "relationship": "supports",
+          "to": "局灶缺血事件待排",
+          "note": "突发局灶症状是支持，但不充分"
+        },
+        {
+          "fact_source_ids": [
+            "S04"
+          ],
+          "relationship": "missing_discriminator",
+          "to": "缺血与模拟病因区分",
+          "note": "关键影像与代谢性检查结果未提供"
+        },
+        {
+          "fact_source_ids": [
+            "S05"
+          ],
+          "relationship": "documented_as",
+          "to": "TIA待排",
+          "note": "来源原文为待排而非确定诊断"
+        }
+      ],
+      "style_takeaways": [
+        "保留起始与终止时间",
+        "既往危险因素与当前事件确诊必须分开",
+        "将待查检查与未执行严格区分"
+      ],
+      "allowed_usage": "manual_quality_review_and_style_study_only"
+    },
+    {
+      "id": "SYN_OBS_001",
+      "type": "ORIGINAL_SYNTHETIC",
+      "department": "产科",
+      "tags": [
+        "obstetrics",
+        "ICP",
+        "GDM",
+        "timeline"
+      ],
+      "case": {
+        "case_id": "SYN_OBS_001",
+        "record_cutoff": "T0",
+        "sources": [
+          {
+            "source_id": "S01",
+            "content": "34岁孕妇，孕31+4周，近4天出现掌跖瘙痒，以夜间明显，未述原发性皮疹。"
+          },
+          {
+            "source_id": "S02",
+            "content": "2026-11-09门诊总胆汁酸13.6μmol/L、ALT 53U/L；2026-11-11复查总胆汁酸12.2μmol/L，ALT结果未提供。"
+          },
+          {
+            "source_id": "S03",
+            "content": "妊娠期糖尿病已由OGTT确诊，患者称当前采用饮食与活动管理，完整家庭血糖记录未提供。"
+          },
+          {
+            "source_id": "S04",
+            "content": "2026-11-12胎心监护报告为反应型；本次入院拟复查肝功能、胆汁酸及进一步评估胎儿情况。"
+          },
+          {
+            "source_id": "S05",
+            "content": "入院初步诊断写有：“妊娠期肝内胆汁淤积症待评估、妊娠期糖尿病”。"
+          }
+        ]
+      },
+      "medical_record": {
+        "case_features": "34岁孕妇，孕31+4周，近4天掌跖瘙痒且夜间明显，原资料未述原发皮疹。2026-11-09总胆汁酸13.6μmol/L、ALT 53U/L；2026-11-11总胆汁酸12.2μmol/L，同次ALT未提供。既往OGTT确诊妊娠期糖尿病，目前自述饮食与活动管理，但完整血糖记录未提供。2026-11-12胎心监护报告为反应型。原文拟复查胆汁酸、肝功能并进一步评估胎儿情况。",
+        "diagnostic_discussion": "孕晚期瘙痒伴胆汁酸和肝酶指标异常提示需要评估妊娠相关胆汁淤积方向，但该病的确诊、分级及鉴别应依据当地适用标准、检查条件和临床复核，不能凭本例两次数值自行作严重程度结论。两次胆汁酸是不同日期的独立检查，不能推断ALT的同步变化；其他肝胆原因是否已经排除，现有资料未充分说明。妊娠期糖尿病的既往诊断明确，但目前缺少完整血糖记录，不能只凭“自述管理中”判定血糖控制达标。已记录胎心监护为反应型，不等于此后每次监护均正常。",
+        "plan": "建议由产科医生结合症状、胆汁酸及肝功能动态复查结果继续评估病因、风险和后续管理；核实既往肝胆相关检查、当前用药及已安排的复查是否落实。收集空腹与餐后血糖记录，按负责医生方案持续进行母胎状态评估，并根据结果调整具体观察或治疗策略。不得将待实施的检查或监测写成已经完成，也不应从病例范例添加固定药物剂量。",
+        "evidence": [
+          {
+            "statement": "孕31+4周并有夜间加重的掌跖瘙痒。",
+            "source_ids": [
+              "S01"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "两次胆汁酸数值来自不同日期。",
+            "source_ids": [
+              "S02"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "既往OGTT确诊妊娠期糖尿病，完整血糖记录未提供。",
+            "source_ids": [
+              "S03"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "胆汁淤积相关病因尚需结合后续检查判断。",
+            "source_ids": [
+              "S01",
+              "S02",
+              "S05"
+            ],
+            "kind": "inference"
+          }
+        ],
+        "review_items": [
+          "2026-11-11的ALT结果未提供",
+          "完整家庭血糖监测资料未提供",
+          "拟复查的肝功能、胆汁酸及母胎评估结果待确认"
+        ]
+      },
+      "evidence_links": [
+        {
+          "fact_source_ids": [
+            "S01",
+            "S02"
+          ],
+          "relationship": "supports",
+          "to": "孕期胆汁淤积待评估",
+          "note": "症状与异常检查同向"
+        },
+        {
+          "fact_source_ids": [
+            "S02"
+          ],
+          "relationship": "observed_at",
+          "to": "不同日期胆汁酸",
+          "note": "不可混成一次检查"
+        },
+        {
+          "fact_source_ids": [
+            "S04"
+          ],
+          "relationship": "status_of",
+          "to": "后续检查planned",
+          "note": "拟复查不是completed"
+        }
+      ],
+      "style_takeaways": [
+        "先按孕周-症状-多时间点检查组织",
+        "不虚构分级",
+        "独立说明已完成胎心监护与未来计划"
+      ],
+      "allowed_usage": "manual_quality_review_and_style_study_only"
+    },
+    {
+      "id": "SYN_RENAL_001",
+      "type": "ORIGINAL_SYNTHETIC",
+      "department": "老年病科/肾内科",
+      "tags": [
+        "renal",
+        "anemia",
+        "geriatrics",
+        "multimorbidity"
+      ],
+      "case": {
+        "case_id": "SYN_RENAL_001",
+        "record_cutoff": "T0",
+        "sources": [
+          {
+            "source_id": "S01",
+            "content": "67岁女性，近2周乏力，活动后心悸，查体结膜苍白、双下肢轻度水肿。"
+          },
+          {
+            "source_id": "S02",
+            "content": "本次化验血红蛋白83g/L，肌酐190μmol/L，分别由实验室标示偏低、偏高。"
+          },
+          {
+            "source_id": "S03",
+            "content": "病历明确记录“未见黑便和肉眼血尿”，既往消化道检查及其他失血情况未提供。"
+          },
+          {
+            "source_id": "S04",
+            "content": "既往肌酐、红细胞指数、网织红细胞计数、尿检和尿量记录未提供，现用药方案待核实。"
+          },
+          {
+            "source_id": "S05",
+            "content": "入院初步问题记载为“贫血原因待查；肾功能异常待查”。"
+          }
+        ]
+      },
+      "medical_record": {
+        "case_features": "67岁女性，近2周出现乏力、活动后心悸，查体结膜苍白、双下肢轻度水肿。本次血红蛋白83g/L（实验室标低），肌酐190μmol/L（标高）。原文明确记录未见黑便及肉眼血尿，但既往消化道检查及其他失血情况未提供。尚缺既往肾功能基线、红细胞指数、网织红细胞、尿检、尿量和当前用药资料。",
+        "diagnostic_discussion": "现有记录可确认贫血和肾功能检查异常，但两者之间是否存在明确因果关系尚不能确定。贫血需结合红细胞指数、网织红细胞及失血、营养等相关资料进一步判断；“未见黑便和肉眼血尿”不能完全排除其他失血可能。单次肌酐升高也不足以区分急性、慢性或急性加重的肾功能异常。双下肢轻度水肿是需要结合容量状态、尿检及其他客观结果综合分析的体征，不宜直接归因为某一种疾病。",
+        "plan": "建议由临床医生核实病程、既往肾功能和贫血相关资料、现行用药及尿量，结合病情评估是否复核血常规、肾功能及尿检，并根据鉴别需要补充红细胞指数、网织红细胞等资料。动态观察乏力、心悸、水肿及客观检查变化，待进一步证据明确后由医生制定具体处理计划。资料中未提供的检查不能描述为已经完成或正常。",
+        "evidence": [
+          {
+            "statement": "贫血相关症状与水肿已有原文记录。",
+            "source_ids": [
+              "S01"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "血红蛋白83g/L、肌酐190μmol/L分别标低、标高。",
+            "source_ids": [
+              "S02"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "病历明确未见黑便和肉眼血尿。",
+            "source_ids": [
+              "S03"
+            ],
+            "kind": "fact"
+          },
+          {
+            "statement": "肾功能异常与贫血的病因联系尚需进一步检查。",
+            "source_ids": [
+              "S02",
+              "S04",
+              "S05"
+            ],
+            "kind": "inference"
+          }
+        ],
+        "review_items": [
+          "既往肾功能基线和贫血指标未提供",
+          "尿量、尿检资料未提供",
+          "现用药及既往失血相关评估需核实"
+        ]
+      },
+      "evidence_links": [
+        {
+          "fact_source_ids": [
+            "S01",
+            "S02"
+          ],
+          "relationship": "supports",
+          "to": "贫血及肾检验异常",
+          "note": "症状和检查支持问题存在"
+        },
+        {
+          "fact_source_ids": [
+            "S03"
+          ],
+          "relationship": "limits",
+          "to": "失血鉴别",
+          "note": "明确阴性不完全排除其他失血"
+        },
+        {
+          "fact_source_ids": [
+            "S04"
+          ],
+          "relationship": "missing_discriminator",
+          "to": "肾功能异常急慢性",
+          "note": "缺既往基线"
+        }
+      ],
+      "style_takeaways": [
+        "避免一次肌酐判断慢性肾病",
+        "区分有来源阴性和未知",
+        "诊疗计划针对具体缺失资料"
+      ],
+      "allowed_usage": "manual_quality_review_and_style_study_only"
+    }
+  ]
+}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .agent_orchestrator import assess_agent_need, run_counter_evidence_agent
 from .clinical_graph import build_clinical_graph
-from .errors import CaseError
+from .errors import CaseError, TaskError
 from .claim_extractor import extract_claims
 from .claim_verifier import (deterministic_claim_issues, has_blocking_issues, issues_for_review,
                              issues_for_revision, run_claim_verifier)
@@ -17,13 +17,14 @@ from .model_client import Budget, MEDICAL_SCHEMA, parse_model_json
 from .note_writer import run_note_writer
 from .protocol import Case
 from .retrieval import DenseEvidenceRetriever
+from .shared_clinical_memory import SharedClinicalMemory
 from .validation import repair_evidence_numeric_support, validate_record
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPT_VERSION = "2026-11-23.baseline-v3"
-CLINICAL_PROMPT_VERSION = "2026-11-24.clinical-v4.4-d-agent-repair-v1"
-COUNTER_PROMPT_VERSION = "2026-11-24.compact-counter-evidence-v2"
+CLINICAL_PROMPT_VERSION = "2026-11-24.clinical-v4.5-graph-agent-audit-v1"
+COUNTER_PROMPT_VERSION = "2026-11-24.compact-counter-evidence-v3-retrieval-aware"
 
 
 def run_case(case: Case, client, pipeline: str, response_format: str, max_calls: int,
@@ -33,7 +34,9 @@ def run_case(case: Case, client, pipeline: str, response_format: str, max_calls:
              clinical_stage_formats: dict[str, str] | None = None,
              clinical_prompt_profile: str = "contrastive",
              graph_retrieval_mode: str = "off",
-             clinical_agent_mode: str = "off") -> tuple[dict, dict]:
+             clinical_agent_mode: str = "off",
+             clinical_writing_guidance: str = "off",
+             shared_clinical_memory: bool = False) -> tuple[dict, dict]:
     started = time.perf_counter(); budget = Budget(max_calls); checks = []
     final_evidence_limit = min(clinical_evidence_limit, 5) if pipeline == "clinical_pipeline" else 5
     raw = [{"source_id": s.source_id, "field_path": s.field_path, "content": s.content} for s in case.sources]
@@ -74,6 +77,7 @@ def run_case(case: Case, client, pipeline: str, response_format: str, max_calls:
             case, client, response_format, budget, retriever, retrieval_top_k,
             clinical_verify, clinical_revise, clinical_evidence_limit, clinical_stage_formats,
             clinical_prompt_profile, graph_retrieval_mode, clinical_agent_mode,
+            clinical_writing_guidance, shared_clinical_memory,
         )
         checks.extend(clinical_checks)
     else:
@@ -101,17 +105,20 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
                   clinical_evidence_limit: int,
                   stage_formats: dict[str, str] | None,
                   prompt_profile: str, graph_retrieval_mode: str,
-                  clinical_agent_mode: str) -> tuple[dict, dict, list[dict]]:
+                  clinical_agent_mode: str, writing_guidance: str,
+                  shared_memory_enabled: bool) -> tuple[dict, dict, list[dict]]:
     formats = {stage: response_format for stage in
                ("planner", "counter_evidence", "writer", "verifier", "reviser")}
     if stage_formats:
         formats.update(stage_formats)
     facts = number_facts(organize_facts(case))
+    shared_memory = SharedClinicalMemory(case, facts) if shared_memory_enabled else None
     prompt_audit = {}
     algorithm_mode = prompt_profile
     planner_fallback = None
     clinical_plan = None; record = None; evidence_bundles = []
     clinical_graph = None; active_retriever = retriever
+    graph_setup_fallback_reason = None; graph_setup_elapsed_ms = 0.0
     agent_assessment = None; counter_review = None; agent_error = None
     writer_evidence_validation = None; final_evidence_validation = None
     try:
@@ -119,7 +126,7 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
                                     prompt_profile, prompt_audit)
     except CaseError as primary_error:
         fallback_eligible = {"INVALID_CLINICAL_PLAN", "MODEL_INVALID_JSON"}
-        if (prompt_profile not in ("contrastive", "contrastive_fewshot")
+        if (prompt_profile not in ("contrastive", "contrastive_fewshot", "contrastive_v2")
                 or primary_error.code not in fallback_eligible):
             raise
         planner_fallback = {"primary_error": primary_error.code,
@@ -147,14 +154,36 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
             algorithm_mode = "baseline_fallback"
             planner_fallback["attempts"].append({"strategy": "baseline", "status": "success"})
     if record is None:
+        if shared_memory is not None:
+            shared_memory.ingest_plan(clinical_plan)
         if graph_retrieval_mode != "off":
             if retriever is None:
                 raise CaseError("GRAPH_RETRIEVAL_CONFIG_MISSING",
                                 "图引导检索需要显式配置 Dense Embedding 检索器。")
-            clinical_graph = build_clinical_graph(case, facts, clinical_plan)
-            active_retriever = GraphGuidedRetriever(
-                retriever, clinical_graph, strategy=graph_retrieval_mode,
-            )
+            graph_setup_started = time.perf_counter()
+            try:
+                clinical_graph = build_clinical_graph(case, facts, clinical_plan)
+                active_retriever = GraphGuidedRetriever(
+                    retriever, clinical_graph, strategy=graph_retrieval_mode,
+                )
+            except Exception as exc:
+                clinical_graph = None
+                active_retriever = retriever
+                graph_setup_fallback_reason = f"graph_setup_failed:{type(exc).__name__}"
+            finally:
+                graph_setup_elapsed_ms = (time.perf_counter() - graph_setup_started) * 1000
+        try:
+            evidence_bundles = retrieve_problem_evidence(clinical_plan, active_retriever,
+                                                         retrieval_top_k, facts)
+        except (CaseError, TaskError) as exc:
+            if graph_retrieval_mode == "off":
+                raise
+            graph_setup_fallback_reason = f"graph_retrieval_failed:{exc.code}"
+            active_retriever = None
+            evidence_bundles = []
+        if shared_memory is not None and graph_retrieval_mode != "off":
+            shared_memory.annotate_retrieval(evidence_bundles)
+        active_prompt_profile = prompt_profile if algorithm_mode == prompt_profile else "legacy"
         agent_assessment = (assess_agent_need(facts, clinical_plan)
                             if clinical_agent_mode != "off" else None)
         should_run_agent = (clinical_agent_mode == "always" or
@@ -164,17 +193,22 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
             try:
                 counter_review = run_counter_evidence_agent(
                     case, facts, clinical_plan, client, formats["counter_evidence"], budget,
+                    evidence_bundles, active_prompt_profile, prompt_audit,
+                    shared_memory.render("counter_evidence") if shared_memory is not None else None,
                 )
             except CaseError as exc:
                 agent_error = {"code": exc.code, "message": exc.message,
                                "details": getattr(exc, "details", {}),
                                **_stage_failure_detail(client, "counter_evidence")}
-        evidence_bundles = retrieve_problem_evidence(clinical_plan, active_retriever,
-                                                     retrieval_top_k, facts)
+        if shared_memory is not None:
+            shared_memory.annotate_counter_review(counter_review)
         record = run_note_writer(case, facts, clinical_plan, evidence_bundles,
                                  client, formats["writer"], budget, clinical_evidence_limit,
-                                 prompt_profile if algorithm_mode == prompt_profile else "legacy", prompt_audit,
-                                 counter_review)
+                                 active_prompt_profile, prompt_audit, counter_review,
+                                 writing_guidance,
+                                 shared_memory.render("writer") if shared_memory is not None else None)
+    elif graph_retrieval_mode != "off" and graph_setup_fallback_reason is None:
+        graph_setup_fallback_reason = "planner_baseline_fallback_bypassed_graph"
     record, writer_evidence_policy = enforce_evidence_policy(record, case, clinical_evidence_limit)
     record, writer_numeric_repair = repair_evidence_numeric_support(record, case)
     checks = validate_record(record, case)
@@ -205,7 +239,9 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
         verification_attempted = True
         try:
             verification = run_claim_verifier(case, claims, record, clinical_plan, active_retriever,
-                                               retrieval_top_k, client, formats["verifier"], budget)
+                                               retrieval_top_k, client, formats["verifier"], budget,
+                                               (prompt_profile if algorithm_mode == prompt_profile else "legacy"),
+                                               prompt_audit)
         except CaseError as exc:
             verification_error = {"code": exc.code, "message": exc.message,
                                   **_stage_failure_detail(client, "verifier")}
@@ -240,6 +276,8 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
                     record, revision_meta = run_local_revision(
                         case, record, clinical_plan, high_issues, active_retriever,
                         retrieval_top_k, client, formats["reviser"], budget,
+                        (prompt_profile if algorithm_mode == prompt_profile else "legacy"),
+                        prompt_audit,
                     )
                     revision_applied = bool(revision_meta.get("revised_claim_ids"))
                     revision_strategy = revision_meta.get("strategy")
@@ -308,16 +346,14 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
         "prompt_profile": prompt_profile,
         "algorithm_mode": algorithm_mode,
         "planner_fallback": planner_fallback,
-        "graph_retrieval": {
-            "mode": graph_retrieval_mode,
-            "enabled": graph_retrieval_mode != "off",
-            "graph": clinical_graph.stats() if clinical_graph else None,
-            "retriever": (active_retriever.stats()
-                          if isinstance(active_retriever, GraphGuidedRetriever) else None),
-        },
+        "graph_retrieval": _graph_retrieval_meta(
+            graph_retrieval_mode, retriever, active_retriever, clinical_graph,
+            graph_setup_fallback_reason, graph_setup_elapsed_ms,
+        ),
         "adaptive_agent": {
             "mode": clinical_agent_mode,
             "prompt_version": COUNTER_PROMPT_VERSION,
+            "prompt_profile": (prompt_profile if algorithm_mode == prompt_profile else "legacy"),
             "assessment": agent_assessment,
             "triggered": counter_review is not None or agent_error is not None,
             "completed": counter_review is not None,
@@ -325,10 +361,20 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
             "reviewed_problem_count": (len(counter_review.get("reviewed_problem_ids", []))
                                        if counter_review else 0),
             "issue_count": len(counter_review.get("issues", [])) if counter_review else 0,
+            "retrieval_bundle_count": (len(evidence_bundles)
+                                       if counter_review is not None or agent_error is not None else 0),
+            "retrieval_candidate_count": (
+                sum(len(bundle.get("candidates", [])) for bundle in evidence_bundles)
+                if counter_review is not None or agent_error is not None else 0
+            ),
         },
         "writer_evidence_validation": writer_evidence_validation,
         "final_evidence_validation": final_evidence_validation,
         "prompt_audit": prompt_audit,
+        "writing_guidance": {"mode": writing_guidance,
+                             "enabled": writing_guidance != "off"},
+        "shared_clinical_memory": (shared_memory.audit() if shared_memory is not None else
+                                   {"enabled": False}),
         "evidence_policy": {"writer": writer_evidence_policy, "post_revision": post_revision_evidence_policy},
     }
     return record, meta, checks
@@ -341,6 +387,39 @@ def _run_baseline_fallback(case: Case, client, response_format: str, budget: Bud
                                                    "sources": raw_sources})
     raw = client.call(messages, response_format, budget, stage="baseline_fallback", schema=MEDICAL_SCHEMA)
     return parse_model_json(raw, stage="baseline_fallback", client=client)
+
+
+def _graph_retrieval_meta(mode: str, dense_retriever, active_retriever,
+                          clinical_graph, setup_fallback_reason: str | None,
+                          setup_elapsed_ms: float) -> dict:
+    graph_stats = (active_retriever.stats()
+                   if isinstance(active_retriever, GraphGuidedRetriever) else None)
+    runtime_reason = graph_stats.get("graph_fallback_reason") if graph_stats else None
+    fallback_reason = setup_fallback_reason or runtime_reason
+    embedding_provider = (type(dense_retriever.client).__name__
+                          if dense_retriever is not None else None)
+    return {
+        "mode": mode,
+        "enabled": mode != "off",
+        "graph_requested": mode != "off",
+        "graph_executed": bool(graph_stats and graph_stats.get("graph_executed")),
+        "graph_mode": mode,
+        "graph_fallback_reason": fallback_reason,
+        "fallback_status": fallback_reason is not None,
+        "embedding_provider": embedding_provider,
+        "seed_fact_ids": graph_stats.get("seed_fact_ids", []) if graph_stats else [],
+        "graph_edge_type_counts": (clinical_graph.stats().get("relations", {})
+                                   if clinical_graph else {}),
+        "candidate_fact_ids": graph_stats.get("candidate_fact_ids", []) if graph_stats else [],
+        "reranked_fact_ids": graph_stats.get("reranked_fact_ids", []) if graph_stats else [],
+        "selected_source_ids": graph_stats.get("selected_source_ids", []) if graph_stats else [],
+        "graph_elapsed_ms": round(
+            setup_elapsed_ms + (graph_stats.get("graph_elapsed_ms", 0.0) if graph_stats else 0.0), 3,
+        ),
+        "ranking_changed": bool(graph_stats and graph_stats.get("ranking_changed")),
+        "graph": clinical_graph.stats() if clinical_graph else None,
+        "retriever": graph_stats,
+    }
 
 
 def _append_review(record: dict, note: str) -> None:

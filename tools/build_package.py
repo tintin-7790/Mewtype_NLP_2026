@@ -3,12 +3,21 @@ import zipfile
 from pathlib import Path
 
 
-INCLUDE = ["main.py", "requirements.txt", "README.md", "resource_manifest.json", "src", "prompts",
+INCLUDE = ["main.py", "requirements.txt", "README.md", "resource_manifest.json", ".env.example", "src", "prompts", "resources",
            "config/competition.example.json", "config/local.mlx.example.json", "tools/adapt_practice.py",
            "config/retrieval.local.example.json", "tools/eval_clinical_pipeline.py",
-           "tools/inspect_clinical_graph.py", "docs/clinical_experiment.md",
+           "tools/check_input.py",
+           "tools/inspect_clinical_graph.py", "tools/smoke_graph_retrieval.py",
+           "docs/clinical_experiment.md",
            "docs/algorithm_optimization_v043.md", "docs/graph_rag_multi_agent_design.md",
-           "docs/clinical_verifier_revision_optimization.md", "docs/d_agent_failure_repair.md"]
+           "docs/clinical_verifier_revision_optimization.md", "docs/d_agent_failure_repair.md",
+           "docs/automatic_input_adapter.md", "docs/d_graph_agent_integration_validation.md",
+           "docs/competition_runtime_readiness.md",
+           "docs/competition_advanced_pipeline_acceptance.md",
+           "docs/unified_entrypoint_full_pipeline_acceptance.md",
+           "docs/dual_json_input_compatibility.md",
+           "docs/clinical_writing_research_synthesis.md",
+           "docs/prompt_v2_shared_memory_writing_knowledge.md"]
 
 
 def main():

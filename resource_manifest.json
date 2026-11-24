@@ -1,12 +1,40 @@
 {
   "schema_status": "项目暂定格式，官方 Schema 待确认",
-  "resources": [],
-  "knowledge_resources": "无",
+  "resources": [
+    {
+      "name": "Mewtype Clinical Writing Guidance v1",
+      "version": "2026-11-24",
+      "kind": "original_synthetic_style_guidance",
+      "path": "resources/clinical_writing",
+      "purpose": "Writer语言、结构与证据关联风格参考；不是患者事实、诊疗指南或source_ids来源",
+      "origin": "公开病历书写规范的原创研究概括，以及原创合成规则卡和教学示例",
+      "license_status": "包内声明未复制第三方患者病历；正式赛事再分发许可仍需团队最终复核",
+      "contains_real_patient_information": false,
+      "network_required": false,
+      "mandatory": false,
+      "files_sha256": {
+        "evidence_relation_rules.json": "ab7670871ec47c389893b24f1df1b38326c17f280375aac22553e8cfa5840371",
+        "grammar_patterns.json": "221d7958597a931843bd650453c454571d6fa4b7dfcb63d26bed3b5a3fbbc172",
+        "style_cards.json": "b86ee84bead6dea1fe0c2ba09c98c1dcf5dfbae161f0ef5e4652ea43b716adf0",
+        "synthetic_decision_cards.json": "d7d1114ba47096d41d9a5ca5485be10466a88f03673200fef34892a04b644dbb",
+        "synthetic_exemplars.json": "ceede49c845701c60f18ef1fa0c9e8b0f22ee55b8222fbc3ed7bdf40f3be0c98",
+        "writing_quality_checklist.json": "68146f85ec775b89b3adba138a07b532670fdf7d0f193a01f49535587c4b1c3e"
+      }
+    }
+  ],
+  "knowledge_resources": "可选临床写作风格资源；默认关闭，不作为患者事实或临床知识检索库",
   "notes": [
     "程序包含对比式临床规划与问题条件化写作提示词、合成 Few-shot 示例、确定性 Problem–Evidence 组织与显著性排序、事实/原子陈述检查、日期等价规范化、证据选择压缩和非阻断风险披露规则，以及默认关闭的 Dense 检索、病例内临床图重排和一次性反证代理代码；不包含外部临床知识库、持久化向量索引、模型权重或 Adapter。",
     "临床图只由当前病例 sources、确定性 Facts 和 Planner 推断关系临时构建；Planner/Agent 关系会标记为推断，不冒充患者事实或固定医学知识。",
     "Claim Verifier 使用 checked_claim_ids 加问题清单的紧凑协议；Local Reviser 使用 Claim ID、字符区间或列表下标应用局部 Patch。两者均不引入外部知识资源。",
     "Counter-Evidence Agent 使用 reviewed_problem_ids 加问题清单的紧凑协议；患者数值 Evidence 可在严格条件下用所引短来源原文确定性修复，不调用外部知识库。",
-    "BGE-M3 默认关闭；FlagEmbedding 和本地权重不是正式依赖，也不随包分发。赛方 HTTP 协议未公布前 official 适配器会明确失败。"
+    "Automatic Input Adapter 只在输入边界执行严格协议检测、Unicode 时间规范化和确定性练习病历展平；与离线转换工具共用实现，不增加医学知识资源，也不修改正式比赛来源编号。",
+    "Graph/PPR 离线 smoke 工具使用确定性 Mock 哈希向量，只验证病例内图、传播、重排与审计控制流；不包含 BGE 权重，不代表 Dense 语义质量或医学效果。",
+    "BGE-M3 默认关闭；FlagEmbedding 和本地权重不是正式依赖，也不随包分发。赛方 HTTP 协议未公布前 official 适配器会明确失败。",
+    "无参数正式运行只使用赛方提供的 MODEL_NAME 和完整 ENDPOINT；不携带开发凭据、本地权重或推测的官方 Embedding 协议字段。",
+    "正式算法由打包时固定的 competition Profile 选择；当前 baseline_safe，完整 Clinical/Graph/Agent Profile 仅在官方预算与 Embedding 协议验收后切换。",
+    "MEWTYPE_DEV_MODE=1 才允许开发 Profile 使用确定性 Mock Embedding；该向量仅验证 PPR/Agent 控制流，不是 BGE-M3，也不会被 competition Profile 自动采用。",
+    "五阶段 contrastive_v2 Prompt 以独立目录提供，当前正式与本地开发 Profile 均未默认启用；阶段 JSON Schema 未改变。",
+    "Shared Clinical Memory 是默认关闭的单病例进程内决策卡，不持久化、不跨病例；Verifier/Reviser 不读取该卡，仍以原始 Sources 为事实依据。"
   ]
 }

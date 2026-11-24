@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from .errors import CaseError
 from .model_client import Budget, VERIFIER_ISSUE_CODES, VERIFIER_SCHEMA, parse_model_json
 from .protocol import Case
+from .prompt_profiles import load_clinical_prompt
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,7 +23,9 @@ HARD_ERROR_CODES = {
 
 def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_plan: dict,
                        retriever, retrieval_top_k: int, client, response_format: str,
-                       budget: Budget) -> dict:
+                       budget: Budget, prompt_profile: str = "contrastive",
+                       prompt_audit: dict | None = None) -> dict:
+    preparation_started = time.perf_counter()
     deterministic = deterministic_claim_issues(case, claims)
     candidates = []
     if retriever is not None:
@@ -46,7 +50,16 @@ def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_pl
                                        "source_ids": issue["source_ids"]}
                                       for issue in deterministic],
     }
-    raw = client.call(_messages("claim_verify_system.txt", payload), response_format, budget,
+    system, _ = load_clinical_prompt("verifier", prompt_profile, "")
+    if prompt_audit is not None:
+        prompt_audit["verifier"] = {
+            "profile": prompt_profile,
+            "system_prompt_chars": len(system),
+            "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
+            "facts_authority": "raw_sources_only",
+            "preparation_elapsed_ms": round((time.perf_counter() - preparation_started) * 1000, 3),
+        }
+    raw = client.call(_messages_from_system(system, payload), response_format, budget,
                       stage="verifier", schema=VERIFIER_SCHEMA)
     response = parse_model_json(raw, stage="verifier", client=client)
     claim_map = {claim["claim_id"]: claim for claim in claims}
@@ -376,6 +389,11 @@ def _exam_documented_before_admission(corpus: str) -> bool:
 
 def _messages(prompt_name: str, payload: dict) -> list[dict]:
     system = (BASE_DIR / "prompts" / prompt_name).read_text(encoding="utf-8")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+
+def _messages_from_system(system: str, payload: dict) -> list[dict]:
     return [{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -25,3 +26,17 @@ def atomic_write_json(path: Path, value) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def backup_existing_file(path: Path, run_id: str, timestamp: str) -> Path | None:
+    """Copy an existing development artifact before a profile-driven rerun."""
+    if not path.is_file():
+        return None
+    base = path.with_name(f"{path.name}.backup.{timestamp}.{run_id[:8]}")
+    candidate = base
+    index = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{base.name}.{index}")
+        index += 1
+    shutil.copy2(path, candidate)
+    return candidate

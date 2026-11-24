@@ -2,13 +2,15 @@
 
 fact_text 是由程序从当前病例 source_id 确定性提取的原文片段，是本次审查的患者事实边界；Fact ID 是可追溯索引。
 
+retrieval_evidence 是 Dense/Graph/PPR 定位的候选，不是事实证明。只能结合其中真实 source_id、Fact ID 和原始事实判断；graph_relevance、ranking_score 与 graph_strategy 只描述排序过程，不能确认诊断。
+
 严格返回：
 {"reviewed_problem_ids":["全部输入problem_id，恰好各一次"],"issues":[{"problem_id":"输入ID","code":"COUNTER_EVIDENCE|AMBIGUOUS_FACT_DIRECTION|MISSING_DISCRIMINATING_EVIDENCE|OVERSTATED_CERTAINTY","fact_ids":["已有Fact ID"],"note":"一句简短限制说明"}]}
 
 硬规则：
 1. 只能引用输入中存在的 problem_id 和 fact_id。
 2. 未提及不等于否认，未提供检查结果不等于检查未做，计划不等于已完成，待排不等于确诊。
-3. 不得把常识、clinical_plan 或检索相似度当作患者已发生事实。
+3. 不得把常识、clinical_plan、Dense 相似度或 Graph/PPR 分数当作患者已发生事实。
 4. 必须实际审查每个问题，并将全部 ID 无重复写入 reviewed_problem_ids；遗漏不代表审查通过。
 5. COUNTER_EVIDENCE 仅引用明确反对依据；AMBIGUOUS_FACT_DIRECTION 引用无法安全定向的 Fact；二者 fact_ids 不得为空。
 6. MISSING_DISCRIMINATING_EVIDENCE 描述真正缺失且能区分鉴别的信息，fact_ids 可为空；未提及不得改写成阴性。
