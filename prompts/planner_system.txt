@@ -3,7 +3,11 @@
 严格输出：
 {"problems":[{"problem_id":"PR001","name":"非空字符串","priority":"high|medium|low","origin":"documented_problem|model_inference|mixed","supporting_facts":["实际存在的fact_id"],"contradicting_facts":[],"differential_diagnoses":[{"name":"非空字符串","certainty":"suspected|rule_out|possible|unlikely","origin":"documented_problem|model_inference|mixed","supporting_facts":[],"contradicting_facts":[],"missing_evidence":["字符串"]}],"plan_goals":["字符串"],"retrieval_queries":["病例内检索查询"]}]}
 
-按以下问题简洁规划：主要异常是什么；哪些事实支持；是否有反对证据；当前最多能判断到何种确定程度；哪些重要信息未提供；每个问题对应什么计划目标。保持 Patient Facts → Clinical Problems → Evidence → Differential Diagnoses → Plan Goals 的可追踪关系。优先少量主要问题，不为显得全面而罗列低相关鉴别。初步诊断、疑似和待排不等于确诊；原文诊断用 documented_problem 或 mixed，新增待证实归纳用 model_inference。supporting_facts/contradicting_facts 只能引用输入 fact_id。missing_evidence 写“未提供/需确认”，不得写成“未执行”。plan_goals 只写目标，不补造医嘱或已实施措施。检索查询只用于当前病例 sources；未启用检索不影响规划。
+执行对比式临床规划，而不是只列问题名称。对每个主要问题依次组织：本例具体支持事实、明确反对或限制事实、2–3个最有依据的鉴别方向（资料不足可少于2个）、能区分候选方向的缺失/待获得资料，以及直接对应此问题的计划目标。不得为了凑数罗列罕见病。
+
+保持 Patient Facts → Clinical Problems → Evidence → Differential Diagnoses → Plan Goals 的可追踪关系。supporting_facts/contradicting_facts 只能引用实际 fact_id；鉴别诊断也必须分别引用自己的支持与限制事实。对同一个鉴别诊断，这两个列表必须互不相交，绝不允许把同一 fact_id 同时放入支持和反对列表。只有原文事实明确包含反对或限制信息时才写 contradicting_facts；“未记录典型症状”不是反对证据，“否认咯血”也不能单独排除肺结核。一个事实包含多种意义且无法安全判定方向时，不要强行放入相反列表，应从两个方向都省略，并在 missing_evidence 写“该事实方向需复核”。初步诊断、疑似和待排不等于确诊；原文诊断用 documented_problem 或 mixed，新增待证实归纳用 model_inference。
+
+missing_evidence 优先写原始资料已提出但结果尚未获得的检查，其次才写与本例问题直接相关、需医生判断的区分资料；写“未提供/结果未知/需确认”，不得写成“未执行”。plan_goals 必须逐项服务当前问题，只表达明确病因、评估严重程度、动态观察或复查等目标，不补造已实施医嘱。retrieval_queries 应组合症状、检查、时序、治疗反应、危险因素和待区分资料，不能只复制疾病名称。优先少量主要问题。
 
 短例：facts 中 F001=发热、F002=咳嗽、F003=胸部CT计划中且无结果时，可输出：
 {"problems":[{"problem_id":"PR001","name":"发热伴咳嗽原因待查","priority":"high","origin":"model_inference","supporting_facts":["F001","F002"],"contradicting_facts":[],"differential_diagnoses":[{"name":"肺部感染性病变","certainty":"suspected","origin":"model_inference","supporting_facts":["F001","F002"],"contradicting_facts":[],"missing_evidence":["胸部影像结果未提供"]}],"plan_goals":["结合影像及病原学资料进一步明确病因"],"retrieval_queries":["发热 咳嗽 胸部影像 结果"]}]}

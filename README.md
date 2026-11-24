@@ -1,6 +1,6 @@
 # 循证智录：首次病程记录生成程序
 
-本项目面向教学比赛，不用于真实诊疗。当前版本 `0.4.2` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供问题导向神经符号生成、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订；正式 Schema、赛方模型参数和资源配额尚待公布。
+本项目面向教学比赛，不用于真实诊疗。当前版本 `0.4.3` 在保留 Baseline 与 Evidence Pipeline 的基础上，提供对比式临床规划、问题条件化证据写作、病例内证据检索、非阻断式风险核验和反馈驱动的单轮局部修订；正式 Schema、赛方模型参数和资源配额尚待公布。
 
 ## 运行
 
@@ -106,11 +106,17 @@ python3 main.py --input input.json --output output.json \
 
 三组 A/B/C 的冻结条件、标注与指标定义见 `docs/retrieval_experiment.md`。
 
-### Clinical Pipeline v0.4.2
+### Clinical Pipeline v0.4.3
 
-Clinical Planner 先输出内部问题表，包括优先级、来源属性、支持/反对事实、鉴别诊断、缺失证据、计划目标和检索查询。所有事实使用程序确定生成的 `F001...`，不存在的事实引用会使单例失败。初步诊断必须标记为 `documented_problem` 或 `mixed`，不能直接视为已证实结论。
+Clinical Planner 先输出内部问题表，包括优先级、来源属性、支持/反对事实、鉴别诊断、区分所需资料、计划目标和检索查询。提示词要求每个主要问题优先保留2–3个有依据的鉴别方向；只有原始资料明确否定或确有不支持事实时才列为反对证据。所有事实使用程序确定生成的 `F001...`，不存在的事实引用会使单例失败。初步诊断必须标记为 `documented_problem` 或 `mixed`，不能直接视为已证实结论。
 
-启用检索时，每个问题的查询只检索当前病例 sources，形成包含来源、字段路径、原文、相似度、时间、断言和状态冲突提示的 Evidence Bundle。Writer 同时接收原始 sources、事实、问题表和证据包；检索结果不是唯一输入，也不自动成为最终 evidence。
+Planner 后由 Python 构建 `problem_evidence_context`，确定性地解析 Fact ID，并按问题组织支持证据、限制证据、各鉴别方向的支持/限制/待区分资料和 plan goals。Writer 明确优先使用这一视图，再回到原始 sources 核对；Planner 仍不是患者事实来源。显著性排序提高问题直接关联事实、数值/单位、明确阴性、更正、时序、状态、异常检查、暴露和治疗史的优先级，降低无关人口学字段优先级。排序只改变组织顺序，不修改事实文本。
+
+启用检索时，每个问题的查询会确定性补入已引用的患者事实、明确限制和待区分资料，再只检索当前病例 sources，形成按 `problem_id` 归组的 Evidence Bundle。Contrastive Writer 接收原始 sources、问题表和去重后的问题证据视图：事实正文只在 Fact-ID catalog 中保存一次，问题/鉴别关系只引用 Fact ID，检索候选按问题归组；检索结果不是唯一输入，也不自动成为最终 evidence。Legacy 档位继续使用原有 facts/evidence_bundles 载荷，避免改变归档提示词的输入契约。
+
+若同一鉴别诊断把同一 Fact ID 同时列为支持和反对，程序会先确认该 ID 合法，再从两个方向同时移除歧义引用，并在 `missing_evidence` 和日志中记录“方向需复核”；不会擅自替模型判断方向，也不会改写原始 facts。规范化后仍无效时，仅对 `INVALID_CLINICAL_PLAN` 或 `MODEL_INVALID_JSON` 启用有限回退：预算足够则最多尝试一次 Legacy Planner，否则用剩余一次调用执行 Baseline；日志中的 `algorithm_mode`/`planner_fallback` 如实记录实际路径，预算不足明确失败。
+
+`--clinical-prompt-profile` 支持三档；正常有效规划不会增加调用次数：`legacy` 使用归档 v0.4 提示词；`contrastive` 是默认的强化规划/写作；`contrastive_fewshot` 从合成示例库按病例关键词为 Planner 和 Writer 各选择最多一个示例。有限回退只在规划结果无效且预算足够时使用已有病例调用预算。日志记录 profile、实际算法模式、示例 ID、规范化摘要及每阶段输入字符数。Few-shot 仅用于实验，不代表质量已经提升。
 
 Writer 之后，程序对五个输出部分拆分原子陈述。确定性规则先检查未知写成否定、频次缺失、事实反转、诊断确定程度、更正、时间和计划状态；可选 Qwen Verifier 再批量返回逐 claim verdict 与结构化问题。HIGH 优先触发第四次局部修订；MEDIUM 不使整例失败，进入待核事项；LOW 不触发额外调用。无来源的 GROUNDED/PARTIALLY_GROUNDED 推断不会伪造来源，而会降级为 REQUIRES_CLINICIAN_REVIEW。若修订未启用、预算不足或修订响应无效，程序对已精确定位的 HIGH 陈述进行保守替换并在 review_items 披露，内部标记 `fallback_disclosed`，不伪装为完全核验通过。未定位字段保持不变；修订最多一轮，之后重新执行确定性规则和原有 validation。
 
@@ -119,21 +125,23 @@ Writer 之后，程序对五个输出部分拆分原子陈述。确定性规则�
 ```bash
 # B：Planner + Writer，共2次Qwen；无Embedding、无核验/修订
 python3.11 main.py --input input.json --output b.json --mode dev_api \
-  --pipeline clinical_pipeline --clinical-verification off --clinical-revision off
+  --pipeline clinical_pipeline --clinical-verification off --clinical-revision off \
+  --clinical-prompt-profile legacy
 
-# C：B + 问题级Dense检索
+# C：Contrastive Planner + Problem-Conditioned Writer；不使用核验
 python3.11 main.py --input input.json --output c.json --mode dev_api \
   --pipeline clinical_pipeline --clinical-verification off --clinical-revision off \
-  --retrieval-config config/retrieval.local.json
+  --clinical-prompt-profile contrastive
 
-# D：C + 原子事实核验；不调用模型修订，HIGH 使用保守替换并披露
+# D：C + 原子事实核验 + 必要时一次局部修订
 python3.11 main.py --input input.json --output d.json --mode dev_api \
-  --pipeline clinical_pipeline --clinical-verification on --clinical-revision off \
-  --retrieval-config config/retrieval.local.json
+  --pipeline clinical_pipeline --clinical-verification on --clinical-revision on \
+  --clinical-prompt-profile contrastive
 
-# E：完整流程；正常3次Qwen，必要时第4次局部修订
+# E：D + 已获准且实际可用的BGE-M3
 python3.11 main.py --input input.json --output e.json --mode dev_api \
   --pipeline clinical_pipeline --clinical-verification on --clinical-revision on \
+  --clinical-prompt-profile contrastive \
   --retrieval-config config/retrieval.local.json
 ```
 
@@ -153,7 +161,7 @@ python3.11 main.py --input test_input.json --output clinical_output.json \
 
 最终 evidence 目标为3–5条且绝不超过5条。程序会先移除结构或来源无效项、合并确定性重复项，再按数值/否定/更正/诊断状态/时间价值及来源覆盖选择；不足3条时按实际保留，不补造。无效项会在 review_items 披露。`--clinical-evidence-limit` 只能设为1–5，该限制不删除内部 facts、claims 或检索候选。
 
-`tools/eval_clinical_pipeline.py` 接受包含 A–E 输入、输出、日志和可选人工标注路径的 manifest，自动汇总结构、来源、调用、Token 与耗时；事实支持、诊断依据覆盖、计划对应、局部修订及 Recall@K/MRR 只有提供人工标注时才计算，不使用模型自评冒充真值。格式见 `docs/clinical_experiment.md`。
+`tools/eval_clinical_pipeline.py` 接受包含 A–E 输入、输出、日志和可选人工标注路径的 manifest，自动汇总三段完整率、正文字符数、结构、来源、调用、Token 与耗时；关键事实错误、事实支持、诊断依据覆盖、反对/限制依据准确性、计划对应、局部修订及 Recall@K/MRR 只有提供人工标注时才计算，不使用模型自评冒充真值。格式见 `docs/clinical_experiment.md`。
 
 `response_format` 可设为 `text`、`json_object`、`json_schema`。能力回退只按 `fallback_response_formats` 显式执行，每次回退计入预算；MLX 直接适配器不支持的格式直接报错。分阶段 Schema 已在百炼开发适配器中具备测试入口，但赛事服务能力仍须独立验证。
 
@@ -169,7 +177,7 @@ python3.11 main.py --input test_input.json --output clinical_output.json \
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 tools/build_package.py --team 团队名称 --version v0.4.2
+python3 tools/build_package.py --team 团队名称 --version v0.4.3
 ```
 
 打包脚本生成一层团队目录，仅包含运行文件、源码、提示词和资源清单，排除 `information/`、配置、凭据、缓存、虚拟环境、测试输出和本地模型。

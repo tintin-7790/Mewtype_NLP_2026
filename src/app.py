@@ -16,7 +16,7 @@ from .protocol import failed_result, load_standard_cases, success_result
 from .retrieval import DenseEvidenceRetriever
 
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 
 def parser():
@@ -35,6 +35,9 @@ def parser():
                    help="clinical_pipeline 核验失败时是否最多局部修订一次")
     p.add_argument("--clinical-evidence-limit", type=int, default=5,
                    help="clinical_pipeline 最终 evidence 条数上限，默认5")
+    p.add_argument("--clinical-prompt-profile",
+                   choices=("legacy", "contrastive", "contrastive_fewshot"), default="contrastive",
+                   help="Clinical Planner/Writer 提示词档位；fewshot 每阶段最多注入一个合成示例")
     p.add_argument("--dev-response-format", choices=("text", "json_object", "json_schema"),
                    help="仅 dev_api Baseline：显式测试服务端输出格式；不自动回退")
     p.add_argument("--clinical-response-format", choices=("text", "json_object", "json_schema"),
@@ -74,6 +77,7 @@ def main(argv=None):
             log["clinical_config"] = {"verification": clinical_verify, "localized_revision": clinical_revise,
                                       "maximum_revision_rounds": 1, "minimum_call_budget": minimum_calls,
                                       "evidence_limit": args.clinical_evidence_limit,
+                                      "prompt_profile": args.clinical_prompt_profile,
                                       "stage_response_formats": clinical_stage_formats}
         recorder = _debug_recorder(args, run_id)
         client, maximum, response_format = _client(args, config)
@@ -116,7 +120,7 @@ def main(argv=None):
                 record, meta = run_case(item, client, args.pipeline, response_format, maximum,
                                         retriever, retrieval_options["top_k"] if retrieval_options else 3,
                                         clinical_verify, clinical_revise, args.clinical_evidence_limit,
-                                        clinical_stage_formats)
+                                        clinical_stage_formats, args.clinical_prompt_profile)
                 meta["token_usage"] = _usage_delta(usage_before, getattr(client, "total_usage", {}))
                 meta["stage_calls"] = list(getattr(client, "call_events", []))[events_before:]
                 if args.pipeline == "baseline":

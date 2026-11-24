@@ -82,7 +82,8 @@ def apply_conservative_fallback(record: dict, issues: list[dict]) -> tuple[dict,
             resolved += 1
         else:
             unresolved.append(issue.get("claim_id"))
-        note = f"高风险项已作保守处理，仍需医生核对原始资料：{issue.get('error_type', 'FACTUAL_RISK')}"
+        hint = issue.get("revision_hint") or "相关事实需结合原始资料确认。"
+        note = f"相关事实已作保守处理，仍需医生确认：{hint}"
         result.setdefault("review_items", [])
         if note not in result["review_items"]:
             result["review_items"].append(note)

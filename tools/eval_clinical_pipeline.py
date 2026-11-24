@@ -22,6 +22,7 @@ from src.validation import validate_record  # noqa: E402
 MANUAL_COUNTS = (
     "supported_fact_claims", "total_fact_claims", "negation_errors", "temporal_status_errors",
     "unsupported_claims", "diagnostic_basis_covered", "diagnostic_basis_total",
+    "limiting_evidence_accurate", "limiting_evidence_total", "critical_fact_errors",
     "plan_problem_links", "plan_items_total", "revision_attempts", "revision_successes",
     "unchanged_sections", "expected_unchanged_sections",
 )
@@ -53,7 +54,7 @@ def _evaluate_run(spec: dict, base: Path) -> dict:
     outputs = json.loads(_path(base, spec["output"]).read_text(encoding="utf-8"))
     log = json.loads(_path(base, spec["log"]).read_text(encoding="utf-8"))
     case_map = {case.case_id: case for case in cases}
-    structure_ok = 0; evidence_total = 0; legal_evidence = 0
+    structure_ok = 0; evidence_total = 0; legal_evidence = 0; complete_sections = 0; body_lengths = []
     for item in outputs:
         case = case_map.get(item.get("case_id"))
         if not case or item.get("status") != "success":
@@ -65,6 +66,10 @@ def _evaluate_run(spec: dict, base: Path) -> dict:
             issues = [{"level": "error"}]
         if not any(issue.get("level") == "error" for issue in issues):
             structure_ok += 1
+        sections = [record.get(key) for key in ("case_features", "diagnostic_discussion", "plan")]
+        if all(isinstance(value, str) and value.strip() for value in sections):
+            complete_sections += 1
+            body_lengths.append(sum(len(value) for value in sections))
         known = {source.source_id for source in case.sources}
         for evidence in record.get("evidence", []) if isinstance(record, dict) else []:
             evidence_total += 1
@@ -75,6 +80,14 @@ def _evaluate_run(spec: dict, base: Path) -> dict:
         "name": name,
         "case_count": len(cases),
         "structure_compliance": _ratio(structure_ok, len(cases)),
+        "three_section_completeness": _ratio(complete_sections, len(cases)),
+        "body_length_chars": {
+            "count": len(body_lengths),
+            "total": sum(body_lengths),
+            "average": round(sum(body_lengths) / len(body_lengths), 2) if body_lengths else None,
+            "minimum": min(body_lengths) if body_lengths else None,
+            "maximum": max(body_lengths) if body_lengths else None,
+        },
         "legal_source_citation": _ratio(legal_evidence, evidence_total),
         "model_calls": int(log.get("total_calls", 0)),
         "token_usage": log.get("token_usage", {}),
@@ -99,6 +112,9 @@ def _manual_metrics(adjudication: dict) -> dict:
         "temporal_status_errors": totals["temporal_status_errors"],
         "unsupported_claims": totals["unsupported_claims"],
         "diagnostic_basis_coverage": _ratio(totals["diagnostic_basis_covered"], totals["diagnostic_basis_total"]),
+        "limiting_evidence_accuracy": _ratio(totals["limiting_evidence_accurate"],
+                                              totals["limiting_evidence_total"]),
+        "critical_fact_errors": totals["critical_fact_errors"],
         "plan_problem_alignment": _ratio(totals["plan_problem_links"], totals["plan_items_total"]),
         "revision_success_rate": _ratio(totals["revision_successes"], totals["revision_attempts"]),
         "unchanged_section_preservation": _ratio(totals["unchanged_sections"], totals["expected_unchanged_sections"]),

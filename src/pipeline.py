@@ -10,7 +10,7 @@ from .clinical_planner import number_facts, retrieve_problem_evidence, run_plann
 from .evidence_policy import enforce_evidence_policy
 from .facts import organize_facts
 from .local_reviser import apply_conservative_fallback, run_local_revision
-from .model_client import Budget, parse_model_json
+from .model_client import Budget, MEDICAL_SCHEMA, parse_model_json
 from .note_writer import run_note_writer
 from .protocol import Case
 from .retrieval import DenseEvidenceRetriever
@@ -19,14 +19,15 @@ from .validation import validate_record
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPT_VERSION = "2026-11-23.baseline-v3"
-CLINICAL_PROMPT_VERSION = "2026-11-23.clinical-v3-neurosymbolic"
+CLINICAL_PROMPT_VERSION = "2026-11-24.clinical-v4-contrastive"
 
 
 def run_case(case: Case, client, pipeline: str, response_format: str, max_calls: int,
              retriever: DenseEvidenceRetriever | None = None, retrieval_top_k: int = 3,
              clinical_verify: bool = True, clinical_revise: bool = True,
              clinical_evidence_limit: int = 5,
-             clinical_stage_formats: dict[str, str] | None = None) -> tuple[dict, dict]:
+             clinical_stage_formats: dict[str, str] | None = None,
+             clinical_prompt_profile: str = "contrastive") -> tuple[dict, dict]:
     started = time.perf_counter(); budget = Budget(max_calls); checks = []
     final_evidence_limit = min(clinical_evidence_limit, 5) if pipeline == "clinical_pipeline" else 5
     raw = [{"source_id": s.source_id, "field_path": s.field_path, "content": s.content} for s in case.sources]
@@ -66,6 +67,7 @@ def run_case(case: Case, client, pipeline: str, response_format: str, max_calls:
         record, clinical_meta, clinical_checks = _run_clinical(
             case, client, response_format, budget, retriever, retrieval_top_k,
             clinical_verify, clinical_revise, clinical_evidence_limit, clinical_stage_formats,
+            clinical_prompt_profile,
         )
         checks.extend(clinical_checks)
     else:
@@ -89,15 +91,53 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
                   retriever: DenseEvidenceRetriever | None, retrieval_top_k: int,
                   clinical_verify: bool, clinical_revise: bool,
                   clinical_evidence_limit: int,
-                  stage_formats: dict[str, str] | None) -> tuple[dict, dict, list[dict]]:
+                  stage_formats: dict[str, str] | None,
+                  prompt_profile: str) -> tuple[dict, dict, list[dict]]:
     formats = {stage: response_format for stage in ("planner", "writer", "verifier", "reviser")}
     if stage_formats:
         formats.update(stage_formats)
     facts = number_facts(organize_facts(case))
-    clinical_plan = run_planner(case, facts, client, formats["planner"], budget)
-    evidence_bundles = retrieve_problem_evidence(clinical_plan, retriever, retrieval_top_k)
-    record = run_note_writer(case, facts, clinical_plan, evidence_bundles,
-                             client, formats["writer"], budget, clinical_evidence_limit)
+    prompt_audit = {}
+    algorithm_mode = prompt_profile
+    planner_fallback = None
+    clinical_plan = None; record = None; evidence_bundles = []
+    try:
+        clinical_plan = run_planner(case, facts, client, formats["planner"], budget,
+                                    prompt_profile, prompt_audit)
+    except CaseError as primary_error:
+        fallback_eligible = {"INVALID_CLINICAL_PLAN", "MODEL_INVALID_JSON"}
+        if (prompt_profile not in ("contrastive", "contrastive_fewshot")
+                or primary_error.code not in fallback_eligible):
+            raise
+        planner_fallback = {"primary_error": primary_error.code,
+                            "primary_message": primary_error.message, "attempts": []}
+        # A legacy planner consumes one call and still needs one Writer call.
+        if budget.remaining >= 2:
+            legacy_audit = {}
+            try:
+                clinical_plan = run_planner(case, facts, client, formats["planner"], budget,
+                                            "legacy", legacy_audit)
+                prompt_audit["legacy_fallback_planner"] = legacy_audit.get("planner", {})
+                algorithm_mode = "legacy_planner_fallback"
+                planner_fallback["attempts"].append({"strategy": "legacy_planner", "status": "success"})
+            except CaseError as legacy_error:
+                planner_fallback["attempts"].append({"strategy": "legacy_planner", "status": "failed",
+                                                     "error": legacy_error.code})
+        if clinical_plan is None:
+            if budget.remaining < 1:
+                raise CaseError(
+                    "CLINICAL_PLANNER_FALLBACK_BUDGET",
+                    f"Contrastive Planner 无有效结果，剩余调用预算不足以执行安全回退；原错误：{primary_error.code}。",
+                ) from primary_error
+            record = _run_baseline_fallback(case, client, formats["writer"], budget)
+            clinical_plan = {"problems": []}
+            algorithm_mode = "baseline_fallback"
+            planner_fallback["attempts"].append({"strategy": "baseline", "status": "success"})
+    if record is None:
+        evidence_bundles = retrieve_problem_evidence(clinical_plan, retriever, retrieval_top_k, facts)
+        record = run_note_writer(case, facts, clinical_plan, evidence_bundles,
+                                 client, formats["writer"], budget, clinical_evidence_limit,
+                                 prompt_profile if algorithm_mode == prompt_profile else "legacy", prompt_audit)
     record, writer_evidence_policy = enforce_evidence_policy(record, case, clinical_evidence_limit)
     checks = validate_record(record, case)
     writer_structure_codes = {"FORMAT", "EVIDENCE_FORMAT", "SOURCE_ID", "EVIDENCE_KIND"}
@@ -111,17 +151,31 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
     verification_risk_counts = {"high": 0, "medium": 0, "low": 0}
     revision_meta = None
     verification_status = "not_run"
+    verification_error = None
     unresolved_risk_count = 0
     if clinical_verify:
-        verification = run_claim_verifier(case, claims, record, clinical_plan, retriever,
-                                           retrieval_top_k, client, formats["verifier"], budget)
-        verification_issue_count = len(verification["issues"])
-        verification_risk_counts = {
-            severity: sum(issue.get("severity") == severity for issue in verification["issues"])
-            for severity in ("high", "medium", "low")
-        }
-        verification_status = "passed" if verification_issue_count == 0 else "risks_reported"
-        if has_blocking_issues(verification):
+        verification = None
+        try:
+            verification = run_claim_verifier(case, claims, record, clinical_plan, retriever,
+                                               retrieval_top_k, client, formats["verifier"], budget)
+        except CaseError as exc:
+            verification_error = {"code": exc.code, "message": exc.message}
+            verification_status = "incomplete_writer_preserved"
+            deterministic = deterministic_claim_issues(case, claims)
+            high_deterministic = [issue for issue in deterministic if issue.get("severity") == "high"]
+            if high_deterministic:
+                record, revision_meta = apply_conservative_fallback(record, high_deterministic)
+                unresolved_risk_count = len(high_deterministic)
+                verification_status = "incomplete_with_conservative_fallback"
+            _append_review(record, "自动核验未完成，病历内容需由医生结合原始资料复核。")
+        if verification is not None:
+            verification_issue_count = len(verification["issues"])
+            verification_risk_counts = {
+                severity: sum(issue.get("severity") == severity for issue in verification["issues"])
+                for severity in ("high", "medium", "low")
+            }
+            verification_status = "passed" if verification_issue_count == 0 else "risks_reported"
+        if verification is not None and has_blocking_issues(verification):
             high_issues = issues_for_revision(verification)
             revision_error = None
             if clinical_revise:
@@ -143,18 +197,14 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
                 for issue in remaining:
                     if issue["severity"] == "high":
                         note = f"尚未自动消除的高风险事实问题：{issue['revision_hint']}"
-                        if note not in record.get("review_items", []):
-                            record.setdefault("review_items", []).append(note)
+                        _append_review(record, note)
             else:
                 unresolved_risk_count = len(high_issues)
                 for issue in high_issues:
-                    note = f"高风险项已局部处理，仍需医生最终确认：{issue['error_type']}"
-                    if note not in record.get("review_items", []):
-                        record.setdefault("review_items", []).append(note)
-        for issue in issues_for_review(verification):
-            note = f"核验提示需医生复核：{issue['statement']}（{issue['revision_hint']}）"
-            if note not in record.get("review_items", []):
-                record.setdefault("review_items", []).append(note)
+                    _append_review(record, f"相关事实已作保守修正，仍需医生确认：{issue['revision_hint']}")
+        if verification is not None:
+            for issue in issues_for_review(verification):
+                _append_review(record, f"需医生复核：{issue['statement']}（{issue['revision_hint']}）")
     elif clinical_revise:
         raise CaseError("CLINICAL_CONFIG_INVALID", "启用局部修订前必须启用原子事实核验。")
     record, post_revision_evidence_policy = enforce_evidence_policy(record, case, clinical_evidence_limit)
@@ -167,15 +217,35 @@ def _run_clinical(case: Case, client, response_format: str, budget: Budget,
         "verification_issue_count": verification_issue_count,
         "verification_risk_counts": verification_risk_counts,
         "verification_status": verification_status,
+        "verification_error": verification_error,
         "unresolved_risk_count": unresolved_risk_count,
         "revision_enabled": clinical_revise,
         "revision_applied": revision_meta is not None,
         "revision": revision_meta,
         "evidence_limit": clinical_evidence_limit,
         "stage_response_formats": formats,
+        "prompt_profile": prompt_profile,
+        "algorithm_mode": algorithm_mode,
+        "planner_fallback": planner_fallback,
+        "prompt_audit": prompt_audit,
         "evidence_policy": {"writer": writer_evidence_policy, "post_revision": post_revision_evidence_policy},
     }
     return record, meta, checks
+
+
+def _run_baseline_fallback(case: Case, client, response_format: str, budget: Budget) -> dict:
+    raw_sources = [{"source_id": source.source_id, "field_path": source.field_path,
+                    "content": source.content} for source in case.sources]
+    messages = _messages("baseline_system.txt", {"record_cutoff": case.record_cutoff,
+                                                   "sources": raw_sources})
+    raw = client.call(messages, response_format, budget, stage="baseline_fallback", schema=MEDICAL_SCHEMA)
+    return parse_model_json(raw, stage="baseline_fallback", client=client)
+
+
+def _append_review(record: dict, note: str) -> None:
+    record.setdefault("review_items", [])
+    if note not in record["review_items"]:
+        record["review_items"].append(note)
 
 
 def _messages(prompt_name: str, payload: dict) -> list[dict]:
@@ -212,6 +282,6 @@ def _preserve_retrieval_review_items(record: dict, retriever: DenseEvidenceRetri
         candidates = retriever.retrieve(item["statement"], top_k=top_k)
         supported = any(candidate.compatible and candidate.unit.source_id in declared for candidate in candidates)
         if not supported:
-            note = f"Dense 检索未找到与已声明来源一致且无明显冲突的候选：{item['statement']}"
+            note = f"该陈述尚未找到与所引原始资料一致的支持内容，需医生复核：{item['statement']}"
             if note not in record["review_items"]:
                 record["review_items"].append(note)

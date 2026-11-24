@@ -29,6 +29,8 @@ class EvalClinicalPipelineTests(unittest.TestCase):
             self.assertEqual(main(["--manifest",str(root/"manifest.json"),"--output",str(result)]),0)
             saved=json.loads(result.read_text(encoding="utf-8"))["runs"][0]
             self.assertEqual(saved["structure_compliance"]["value"],1.0)
+            self.assertEqual(saved["three_section_completeness"]["value"],1.0)
+            self.assertEqual(saved["body_length_chars"]["count"],1)
             self.assertEqual(saved["manual_metrics"]["retrieval_recall_at_k"]["value"],0.5)
             self.assertEqual(saved["manual_metrics"]["retrieval_mrr"],0.5)
 

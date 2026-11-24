@@ -4,6 +4,10 @@ import unittest
 from pathlib import Path
 
 from src.app import main
+from src.errors import CaseError
+from src.model_client import MockClient
+from src.pipeline import run_case
+from src.protocol import Case, Source
 
 
 def planner():
@@ -60,6 +64,8 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
         self.assertEqual(log["cases"][0]["calls"],2)
         self.assertEqual(log["cases"][0]["clinical"]["evidence_bundle_count"],0)
+        self.assertEqual(log["cases"][0]["clinical"]["prompt_profile"],"contrastive")
+        self.assertIn("planning_policy",log["cases"][0]["clinical"]["prompt_audit"]["planner"])
 
     def test_three_call_clinical_pipeline_without_revision(self):
         code,output,log=self.run_pipeline([planner(),draft(),claims()],
@@ -79,6 +85,21 @@ class ClinicalPipelineTests(unittest.TestCase):
         events=log["cases"][0]["stage_calls"]
         self.assertEqual([event["response_format"] for event in events],
                          ["json_schema", "json_schema", "json_schema"])
+        for event in events:
+            self.assertGreater(event["input_text_chars"], 0)
+            self.assertGreater(event["system_prompt_chars"], 0)
+            self.assertGreater(event["user_payload_chars"], 0)
+
+    def test_legacy_prompt_profile_remains_available(self):
+        code,output,log=self.run_pipeline([planner(),draft()],
+            ["--clinical-verification","off","--clinical-revision","off",
+             "--clinical-prompt-profile","legacy"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["prompt_profile"],"legacy")
+        self.assertEqual(clinical["algorithm_mode"],"legacy")
+        self.assertEqual([event["stage"] for event in log["cases"][0]["stage_calls"]],
+                         ["planner","writer"])
 
     def test_problem_retrieval_is_injected_and_logged(self):
         config=self.root/"retrieval.json"
@@ -114,7 +135,7 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertNotIn("尚未开始抗感染治疗", output[0]["medical_record"]["plan"])
         self.assertEqual(log["cases"][0]["clinical"]["verification_status"],"fallback_disclosed")
 
-    def test_verifier_extra_data_is_attributed_to_third_stage(self):
+    def test_verifier_extra_data_preserves_legal_writer_draft(self):
         script=self.root/"malformed.json"; output=self.root/"malformed-output.json"; log_path=self.root/"malformed-log.json"
         script.write_text(json.dumps([
             {"content":json.dumps(planner(),ensure_ascii=False)},
@@ -124,12 +145,74 @@ class ClinicalPipelineTests(unittest.TestCase):
         code=main(["--input",str(self.input),"--output",str(output),"--log",str(log_path),
                    "--mode","mock","--mock-responses",str(script),"--pipeline","clinical_pipeline"])
         saved_output=json.loads(output.read_text()); saved_log=json.loads(log_path.read_text())
-        self.assertEqual(code,0); self.assertEqual(saved_output[0]["error"]["code"],"MODEL_INVALID_JSON")
-        self.assertIn("verifier", saved_output[0]["error"]["message"])
+        self.assertEqual(code,0); self.assertEqual(saved_output[0]["status"],"success")
+        self.assertEqual(saved_output[0]["medical_record"]["case_features"], draft()["case_features"])
+        self.assertTrue(any("自动核验未完成" in item
+                            for item in saved_output[0]["medical_record"]["review_items"]))
+        clinical=saved_log["cases"][0]["clinical"]
+        self.assertEqual(clinical["verification_status"],"incomplete_writer_preserved")
+        self.assertEqual(clinical["verification_error"]["code"],"MODEL_INVALID_JSON")
         event=saved_log["cases"][0]["stage_calls"][2]
         self.assertEqual(event["stage"],"verifier"); self.assertFalse(event["json_parse_success"])
         self.assertEqual(event["parse_error_type"],"JSON_TRAILING_TEXT")
         self.assertIsInstance(event["parse_error_position"],int)
+
+    def test_invalid_verifier_verdict_preserves_writer_draft(self):
+        verdict=claims(); verdict["claims"][0]["verdict"]="GROUNDED"
+        code,output,log=self.run_pipeline([planner(),draft(),verdict],
+            ["--clinical-verification","on","--clinical-revision","on"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        self.assertEqual(output[0]["medical_record"]["case_features"],draft()["case_features"])
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["verification_status"],"incomplete_writer_preserved")
+        self.assertEqual(clinical["verification_error"]["code"],"INVALID_CLAIM_VERIFICATION")
+
+    def test_invalid_reviser_response_uses_conservative_fallback(self):
+        bad=draft("当前尚未开始抗感染治疗。")
+        code,output,log=self.run_pipeline([planner(),bad,claims(True),{"unexpected":"value"}],
+            ["--clinical-verification","on","--clinical-revision","on"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        self.assertNotIn("尚未开始抗感染治疗",output[0]["medical_record"]["plan"])
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["verification_status"],"fallback_disclosed")
+        self.assertEqual(clinical["revision"]["model_revision_error"]["code"],"INVALID_LOCAL_REVISION")
+
+    def test_invalid_contrastive_plan_uses_baseline_fallback_and_logs_mode(self):
+        invalid={"problems":[]}
+        code,output,log=self.run_pipeline([invalid,draft()],
+            ["--clinical-verification","off","--clinical-revision","off",
+             "--clinical-prompt-profile","contrastive"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        clinical=log["cases"][0]["clinical"]
+        self.assertEqual(clinical["algorithm_mode"],"baseline_fallback")
+        self.assertEqual(clinical["planner_fallback"]["primary_error"],"INVALID_CLINICAL_PLAN")
+        self.assertEqual([event["stage"] for event in log["cases"][0]["stage_calls"]],
+                         ["planner","baseline_fallback"])
+
+    def test_duplicate_direction_fact_is_normalized_without_case_failure(self):
+        conflicted=planner()
+        conflicted["problems"][0]["differential_diagnoses"]=[{
+            "name":"感染性病变", "certainty":"suspected", "origin":"model_inference",
+            "supporting_facts":["F001"], "contradicting_facts":["F001"],
+            "missing_evidence":[]
+        }]
+        code,output,log=self.run_pipeline([conflicted,draft()],
+            ["--clinical-verification","off","--clinical-revision","off"])
+        self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
+        policy=log["cases"][0]["clinical"]["prompt_audit"]["planner"]["planning_policy"]
+        self.assertEqual(policy["fact_conflict_normalizations"],1)
+        self.assertEqual(policy["ambiguous_fact_ids"],["F001"])
+        self.assertEqual(log["cases"][0]["clinical"]["algorithm_mode"],"contrastive")
+
+    def test_invalid_plan_without_fallback_budget_fails_explicitly(self):
+        script=self.root/"one-response.json"
+        script.write_text(json.dumps([{"content":json.dumps({"problems":[]})}]),encoding="utf-8")
+        client=MockClient(script)
+        case=Case("C", "T0", [Source("S1", "发热。")])
+        with self.assertRaises(CaseError) as raised:
+            run_case(case,client,"clinical_pipeline","text",1,
+                     clinical_verify=False,clinical_revise=False)
+        self.assertEqual(raised.exception.code,"CLINICAL_PLANNER_FALLBACK_BUDGET")
 
     def test_low_issue_does_not_trigger_revision_call(self):
         verdict=claims(); verdict["issues"]=[{
@@ -151,7 +234,7 @@ class ClinicalPipelineTests(unittest.TestCase):
             ["--clinical-verification","on","--clinical-revision","on"])
         self.assertEqual(code,0); self.assertEqual(output[0]["status"],"success")
         self.assertEqual(log["cases"][0]["calls"],3)
-        self.assertTrue(any("核验提示需医生复核" in item
+        self.assertTrue(any("需医生复核" in item
                             for item in output[0]["medical_record"]["review_items"]))
 
     def test_unreferenced_grounded_reasoning_is_downgraded_without_case_failure(self):

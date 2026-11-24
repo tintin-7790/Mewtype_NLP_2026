@@ -34,7 +34,7 @@ class EvidencePolicyTests(unittest.TestCase):
         result, report = enforce_evidence_policy(base_record(items), self.case)
         self.assertEqual(result["evidence"], [])
         self.assertEqual(report["invalid_removed"], 1)
-        self.assertIn("来源编号无效", result["review_items"][0])
+        self.assertIn("未能可靠对应原始资料", result["review_items"][0])
 
     def test_equivalent_year_month_notation_is_accepted(self):
         record = base_record([{"statement":"患者于2026.05就诊。", "source_ids":["S1"], "kind":"fact"}])

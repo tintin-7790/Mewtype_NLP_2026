@@ -7,12 +7,12 @@
 | 组别 | 流程 | Qwen 调用预算 |
 |---|---|---:|
 | A | 原 Baseline | 1 |
-| B | Planner + Writer | 2 |
-| C | B + Dense Retrieval | 2 |
-| D | C + Claim Verification | 3 |
-| E | D + 必要时 Localized Revision | 4（正常通常3） |
+| B | 归档 Planner + Writer（`legacy`） | 2 |
+| C | Contrastive Planner + Problem-Conditioned Writer | 2 |
+| D | C + Claim Verification + 必要时 Localized Revision | 4（正常通常3） |
+| E | D + 实际可用的 BGE-M3 | 与D相同Qwen预算，另计Embedding |
 
-D 检出 high 问题时不调用模型修订，而是对可精确定位的陈述作保守替换并披露；无法形成合法输出时才失败。medium 作为待核事项保留，low 不触发额外调用。E 仅对 high 问题最多进行一轮模型局部修订，修订失败时使用相同保守回退。每组分别记录 Qwen 与 Embedding 调用、Token、耗时、内部核验状态和未解决风险数。
+D/E 仅对 high 问题最多进行一轮模型局部修订，修订失败时使用保守回退。Verifier 自身 JSON/verdict 失败时保留合法 Writer 草稿，并在内部日志标记核验未完成。medium 作为待核事项保留，low 不触发额外调用。每组分别记录 Qwen 与 Embedding 调用、Token、耗时、内部核验状态和未解决风险数。`contrastive_fewshot` 可作为额外 C2 实验，每阶段最多注入一个合成示例，不与默认 C 混记。
 
 ## 评测 manifest
 
@@ -47,6 +47,9 @@ D 检出 high 问题时不调用模型修订，而是对可精确定位的陈述
       "unsupported_claims": 1,
       "diagnostic_basis_covered": 3,
       "diagnostic_basis_total": 4,
+      "limiting_evidence_accurate": 2,
+      "limiting_evidence_total": 2,
+      "critical_fact_errors": 0,
       "plan_problem_links": 3,
       "plan_items_total": 4,
       "revision_attempts": 1,
@@ -69,4 +72,4 @@ python3.11 tools/eval_clinical_pipeline.py \
   --output experiments/summary.json
 ```
 
-报告每项指标的分子、分母和值。事实支持、诊断依据和计划对应需要医学或合格人工审核；规则只能作为初筛，不能替代医学评价。
+自动报告三段正文完整率、字符数、结构、合法来源、调用量、Token和耗时。事实支持、关键事实错误、诊断依据、反对/限制依据准确性和计划对应需要医学或合格人工审核；规则只能作为初筛，不能替代医学评价。

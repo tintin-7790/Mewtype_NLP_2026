@@ -62,7 +62,7 @@ class LocalRevisionTests(unittest.TestCase):
                  "revision_hint":"改为当前治疗状态未提供。", "source_ids":[]}
         after, meta = apply_conservative_fallback(before, [issue])
         self.assertNotIn("尚未开始", after["plan"])
-        self.assertTrue(any("高风险项已作保守处理" in item for item in after["review_items"]))
+        self.assertTrue(any("相关事实已作保守处理" in item for item in after["review_items"]))
         self.assertGreater(meta["amplitude"]["plan"]["changed_char_estimate"], 0)
         self.assertNotIn("before_text", meta["amplitude"]["plan"])
 

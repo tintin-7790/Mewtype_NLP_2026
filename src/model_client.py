@@ -39,7 +39,7 @@ PLANNER_SCHEMA = {"name": "clinical_plan", "strict": True, "schema": {
             "origin": {"type": "string", "enum": ["documented_problem", "model_inference", "mixed"]},
             "supporting_facts": {"type": "array", "items": {"type": "string"}},
             "contradicting_facts": {"type": "array", "items": {"type": "string"}},
-            "differential_diagnoses": {"type": "array", "items": {
+            "differential_diagnoses": {"type": "array", "maxItems": 3, "items": {
                 "type": "object", "additionalProperties": False,
                 "required": ["name", "certainty", "origin", "supporting_facts",
                              "contradicting_facts", "missing_evidence"],
@@ -51,8 +51,8 @@ PLANNER_SCHEMA = {"name": "clinical_plan", "strict": True, "schema": {
                     "contradicting_facts": {"type": "array", "items": {"type": "string"}},
                     "missing_evidence": {"type": "array", "items": {"type": "string"}},
                 }}},
-            "plan_goals": {"type": "array", "items": {"type": "string"}},
-            "retrieval_queries": {"type": "array", "items": {"type": "string"}},
+            "plan_goals": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "retrieval_queries": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         }}}}}}
 
 _VERIFIER_CLAIM = {"type": "object", "additionalProperties": False,
@@ -94,6 +94,8 @@ REVISER_SCHEMA = {"name": "localized_revision", "strict": True, "schema": {
 
 class Budget:
     def __init__(self, maximum: int): self.maximum, self.calls = maximum, 0
+    @property
+    def remaining(self): return max(0, self.maximum - self.calls)
     def take(self):
         if self.calls >= self.maximum: raise CaseError("CALL_BUDGET_EXCEEDED", "已达到显式配置的每例调用预算。")
         self.calls += 1
@@ -105,21 +107,22 @@ class MockClient:
         self.total_usage = _empty_usage(); self.call_events = []
     def call(self, messages, response_format, budget: Budget, *, stage="model", schema=None):
         budget.take(); self.total_calls += 1
+        prompt_metrics = _message_metrics(messages)
         if self.index >= len(self.entries):
-            self._event(stage, response_format, False, "MOCK_EXHAUSTED"); raise CaseError("MOCK_EXHAUSTED", "mock 响应不足。")
+            self._event(stage, response_format, False, "MOCK_EXHAUSTED", prompt_metrics); raise CaseError("MOCK_EXHAUSTED", "mock 响应不足。")
         entry = self.entries[self.index]; self.index += 1
         if entry.get("exception") == "timeout":
-            self._event(stage, response_format, False, "MODEL_TIMEOUT"); raise CaseError("MODEL_TIMEOUT", "mock 超时。")
+            self._event(stage, response_format, False, "MODEL_TIMEOUT", prompt_metrics); raise CaseError("MODEL_TIMEOUT", "mock 超时。")
         if entry.get("exception"):
-            self._event(stage, response_format, False, "MODEL_ERROR"); raise CaseError("MODEL_ERROR", str(entry["exception"]))
-        self._event(stage, response_format, True, None)
+            self._event(stage, response_format, False, "MODEL_ERROR", prompt_metrics); raise CaseError("MODEL_ERROR", str(entry["exception"]))
+        self._event(stage, response_format, True, None, prompt_metrics)
         return entry.get("content", "")
-    def _event(self, stage, response_format, success, error_type):
+    def _event(self, stage, response_format, success, error_type, prompt_metrics):
         self.call_events.append({"stage": stage, "model": "mock", "response_format": response_format,
                                  "call_success": success, "json_parse_success": None,
                                  "parse_error_type": None, "parse_error_position": None,
                                  "token_usage": _empty_usage(), "elapsed_ms": 0.0,
-                                 "call_error_type": error_type})
+                                 "call_error_type": error_type, **prompt_metrics})
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
 
@@ -145,6 +148,7 @@ class ChatCompletionsClient:
             selected_schema = schema or MEDICAL_SCHEMA
             body["response_format"] = {"type": "json_schema", "json_schema": selected_schema}
         headers = self._headers()
+        prompt_metrics = _message_metrics(messages)
         request = urllib.request.Request(self.config.endpoint, json.dumps(body).encode(), headers, method="POST")
         for attempt in range(self.config.max_retries + 1):
             budget.take(); self.total_calls += 1; self.format_attempts.append(fmt)
@@ -155,14 +159,15 @@ class ChatCompletionsClient:
                 self._record_usage(payload.get("usage"))
                 content = payload["choices"][0]["message"]["content"]
                 self.last_response_format = fmt
-                self._record_call_event(stage, fmt, True, payload.get("usage"), request_started)
+                self._record_call_event(stage, fmt, True, payload.get("usage"), request_started,
+                                        prompt_metrics=prompt_metrics)
                 self._debug({"event": "response", "model": self.config.model,
                              "stage": stage, "requested_response_format": fmt, "content": content,
                              "usage": payload.get("usage", {})})
                 return content
             except urllib.error.HTTPError as exc:
                 body_text = exc.read().decode("utf-8", errors="replace")[:4000]
-                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__)
+                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__, prompt_metrics)
                 self._debug({"event": "http_error", "model": self.config.model, "stage": stage,
                              "requested_response_format": fmt, "http_status": exc.code,
                              "service_error": body_text})
@@ -172,20 +177,20 @@ class ChatCompletionsClient:
                 if attempt == self.config.max_retries:
                     raise CaseError("MODEL_HTTP_ERROR", f"模型接口 HTTP {exc.code}，请求格式={fmt}。") from exc
             except (urllib.error.URLError, socket.timeout, KeyError, ValueError) as exc:
-                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__)
+                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__, prompt_metrics)
                 self._debug({"event": "client_error", "model": self.config.model, "stage": stage,
                              "requested_response_format": fmt, "error_type": type(exc).__name__})
                 if attempt == self.config.max_retries:
                     code = "MODEL_TIMEOUT" if isinstance(exc, (socket.timeout, TimeoutError)) else "MODEL_ERROR"
                     raise CaseError(code, f"模型接口失败：{type(exc).__name__}") from exc
 
-    def _record_call_event(self, stage, fmt, success, usage, started, error_type=None):
+    def _record_call_event(self, stage, fmt, success, usage, started, error_type=None, prompt_metrics=None):
         self.call_events.append({"stage": stage, "model": self.config.model, "response_format": fmt,
                                  "call_success": success, "json_parse_success": None,
                                  "parse_error_type": None, "parse_error_position": None,
                                  "token_usage": _safe_usage(usage),
                                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-                                 "call_error_type": error_type})
+                                 "call_error_type": error_type, **(prompt_metrics or {})})
 
     def record_parse_result(self, stage, success, error_type=None, position=None):
         _update_parse_event(self.call_events, stage, success, error_type, position)
@@ -240,12 +245,14 @@ class MlxDirectClient:
                 raise CaseError("LOCAL_MODEL_LOAD_ERROR", f"本地 MLX 模型加载失败：{type(exc).__name__}") from exc
         model, tokenizer = self._loaded
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt_metrics = _message_metrics(messages)
         try:
             result = generate(model, tokenizer, prompt=prompt, max_tokens=self.config.max_tokens, verbose=False)
             self.call_events.append({"stage": stage, "model": self.config.model, "response_format": response_format,
                                      "call_success": True, "json_parse_success": None,
                                      "parse_error_type": None, "parse_error_position": None,
                                      "token_usage": _empty_usage(), "elapsed_ms": 0.0, "call_error_type": None})
+            self.call_events[-1].update(prompt_metrics)
             return result
         except Exception as exc:
             raise CaseError("LOCAL_MODEL_ERROR", f"本地 MLX 推理失败：{type(exc).__name__}") from exc
@@ -294,6 +301,16 @@ def parse_model_json(text: str, *, stage: str = "model", client=None):
 
 def _empty_usage():
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _message_metrics(messages) -> dict:
+    contents = [message.get("content", "") if isinstance(message, dict) else "" for message in messages]
+    return {
+        "message_count": len(contents),
+        "input_text_chars": sum(len(content) for content in contents),
+        "system_prompt_chars": len(contents[0]) if contents else 0,
+        "user_payload_chars": len(contents[-1]) if len(contents) > 1 else 0,
+    }
 
 
 def _safe_usage(usage):

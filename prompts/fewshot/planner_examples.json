@@ -1,0 +1,20 @@
+[
+  {
+    "id": "synthetic_respiratory_contrast",
+    "order": 1,
+    "selector_terms": ["咳嗽", "发热", "肺", "痰"],
+    "text": "合成输入事实：F001=发热咳嗽，F002=胸部影像有浸润，F003=否认明确结核密切接触，F004=结核病原学结果未提供。合规输出示意：{\"problems\":[{\"problem_id\":\"PR001\",\"name\":\"肺部感染性病变，病原待明确\",\"priority\":\"high\",\"origin\":\"mixed\",\"supporting_facts\":[\"F001\",\"F002\"],\"contradicting_facts\":[],\"differential_diagnoses\":[{\"name\":\"一般细菌性肺部感染\",\"certainty\":\"suspected\",\"origin\":\"model_inference\",\"supporting_facts\":[\"F001\",\"F002\"],\"contradicting_facts\":[],\"missing_evidence\":[\"病原学结果未提供\"]},{\"name\":\"肺结核\",\"certainty\":\"rule_out\",\"origin\":\"model_inference\",\"supporting_facts\":[\"F002\"],\"contradicting_facts\":[\"F003\"],\"missing_evidence\":[\"结核病原学结果未提供\"]}],\"plan_goals\":[\"结合已计划的病原学检查区分感染类型\",\"动态评估症状及影像变化\"],\"retrieval_queries\":[\"发热 咳嗽 肺部影像 炎症指标 既往治疗\",\"结核 病程 影像 接触史 病原学结果\"]}]}。注意：否认密切接触只是限制信息，不能单独排除结核。"
+  },
+  {
+    "id": "synthetic_multimorbidity_timeline",
+    "order": 2,
+    "selector_terms": ["既往史", "多病", "复查", "入院前", "术后"],
+    "text": "合成输入事实：F001=入院前已完成头颅CT，F002=当前短暂神经症状，F003=既往高血压正在用药，F004=后续MRI拟完善。规划应把当前神经症状与慢病管理分为有优先级的问题；不得把入院前CT写成入院后检查，也不得把拟完善MRI写成已有结果。每个plan_goal仅服务对应问题。"
+  },
+  {
+    "id": "synthetic_pending_diagnosis",
+    "order": 3,
+    "selector_terms": ["待排", "不详", "未提供", "拟完善", "原因待查"],
+    "text": "合成输入事实：F001=初步诊断自身免疫病待排，F002=相关抗体结果未提供，F003=当前治疗情况不详。规划须保留rule_out或possible，不得升级确诊；missing_evidence写未提供的资料，plan_goal写明确诊断和评估治疗需求，不得写成患者未治疗。"
+  }
+]
