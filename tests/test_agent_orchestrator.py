@@ -198,7 +198,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertTrue(clinical["verification_completed"])
             self.assertEqual(clinical["verification_coverage"],1.0)
 
-    def test_final_evidence_failure_keeps_clinical_progress_log(self):
+    def test_final_evidence_failure_is_dropped_and_keeps_clinical_progress_log(self):
         bad=_draft(); bad["evidence"]=[{"statement":"诊断阈值为10μmol/L。",
             "source_ids":["S1"],"kind":"inference"}]
         with tempfile.TemporaryDirectory() as directory:
@@ -212,12 +212,14 @@ class AgentOrchestratorTests(unittest.TestCase):
                 "--mode","mock","--mock-responses",str(responses),"--pipeline","clinical_pipeline",
                 "--clinical-agents","always","--clinical-verification","on","--clinical-revision","on"])
             result=json.loads(output.read_text())[0]; case_log=json.loads(log.read_text())["cases"][0]
-            self.assertEqual(code,0); self.assertEqual(result["status"],"failed")
-            self.assertEqual(case_log["failed_stage"],"final_validation")
+            self.assertEqual(code,0); self.assertEqual(result["status"],"success")
+            self.assertEqual(result["medical_record"]["evidence"], [])
             self.assertIsInstance(case_log["elapsed_ms"],float)
             self.assertTrue(case_log["clinical"]["adaptive_agent"]["completed"])
-            self.assertTrue(case_log["clinical"]["verification_completed"])
-            self.assertEqual(case_log["clinical"]["final_evidence_validation"]["error_count"],1)
+            self.assertTrue(case_log["clinical"]["verification_attempted"])
+            recovery = case_log["clinical"]["writer_evidence_validation"]["repair"]
+            self.assertTrue(recovery["partial_evidence_recovery"])
+            self.assertEqual(recovery["evidence_validation_final"]["error_count"], 0)
 
 
 if __name__ == "__main__":

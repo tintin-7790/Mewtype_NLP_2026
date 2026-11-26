@@ -56,10 +56,6 @@ def enforce_evidence_policy(record: dict, case: Case, limit: int = MAX_EVIDENCE)
     result["evidence"] = [entry["item"] for entry in selected]
     if not isinstance(result.get("review_items"), list):
         result["review_items"] = []
-    if invalid_count:
-        note = "部分来源依据未能可靠对应原始资料，需医生复核。"
-        if note not in result["review_items"]:
-            result["review_items"].append(note)
     return result, {
         "applied": True,
         "input_count": len(record["evidence"]),

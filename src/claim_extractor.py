@@ -34,27 +34,22 @@ def extract_claims(record: dict) -> list[dict]:
 def _split_with_spans(text: str) -> list[tuple[str, int, int]]:
     """Split deterministic claims while retaining exact replacement spans.
 
-    Sentence/semicolon boundaries are always atomic. Long or measurement-dense
-    sentences are additionally split on commas; short clinical lists remain
-    together so negation scope is not destroyed.
+    Only sentence/semicolon boundaries are editable Claim boundaries.  Earlier
+    versions split long sentences on commas, which allowed a fallback patch to
+    replace half of a parenthesised clinical analysis and corrupt adjacent text.
+    Long sentences remain one Claim so a patch is either structurally complete
+    or rejected; evidence details are still available in the original sources.
     """
     result = []
     for match in re.finditer(r"[^。！？!?；;\r\n]+(?:[。！？!?；;]+|$)", text):
-        raw = match.group(0)
-        numeric_count = len(re.findall(r"\d+(?:\.\d+)?\s*(?:℃|%|mg/L|g/L|mmol/L|×10|次/分)", raw))
-        parts = (list(re.finditer(r"[^，,]+(?:[，,]|$)", raw))
-                 if len(raw) > 72 or numeric_count >= 2 else [re.match(r"[\s\S]+", raw)])
-        for part in parts:
-            if part is None:
-                continue
-            value = part.group(0)
-            left = len(value) - len(value.lstrip())
-            right = len(value.rstrip())
-            if right <= left:
-                continue
-            start = match.start() + part.start() + left
-            end = match.start() + part.start() + right
-            result.append((text[start:end], start, end))
+        value = match.group(0)
+        left = len(value) - len(value.lstrip())
+        right = len(value.rstrip())
+        if right <= left:
+            continue
+        start = match.start() + left
+        end = match.start() + right
+        result.append((text[start:end], start, end))
     return result
 
 

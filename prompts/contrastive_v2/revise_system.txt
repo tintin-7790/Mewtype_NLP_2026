@@ -11,3 +11,5 @@
 5. 对于有可靠原文的错误优先正确替换；若某 Claim 无法安全修订，应保留可证实部分、删除不能支持的具体断言，必要时在 review_items_to_add 中写清具体待确认事项。不得仅用‘该项患者事实存在冲突’等空泛措辞代替事实核查。
 6. 不能删除真实关键病史以便通过校验；不得发明患者数值、用药、检查、结果、诊断或 Source ID。review_items 只写临床事项，不写系统内部错误或审核器评价。
 7. 仅输出严格 JSON；若无需修改，返回 {"edits":[],"review_items_to_add":[]}。
+8. 若 issue 为 INTERNAL_AUDIT_LEAK，必须在目标 Claim 中删除内部 ID，并基于 sources 保留可证实的临床含义；不得只删 ID 而保留其造成的过度否定或错误推断。若为 TECHNICAL_REVIEW_ITEM，使用 remove 删除该列表项，技术说明不转移到 review_items_to_add。
+9. replacement 必须与原 Claim 实质不同，并解决 issue 指定的问题；把原句原样返回不算修订。弱阴性只能按原文强度表述，不能据此充分排除隐匿性疾病。

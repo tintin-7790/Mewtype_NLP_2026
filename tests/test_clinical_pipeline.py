@@ -175,7 +175,7 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertTrue(clinical["deterministic_fallback_applied"])
         self.assertEqual(clinical["revision"]["model_revision_error"]["code"],"INVALID_LOCAL_REVISION")
 
-    def test_safe_non_edit_is_logged_as_unresolved_not_model_revision(self):
+    def test_safe_non_edit_is_preserved_in_audit_then_isolated_by_output_guarantee(self):
         verdict=claims(); verdict["issues"]=[{
             "claim_id":"C003","code":"UNSAFE_RECOMMENDATION","severity":"high",
             "hint":"无法自动安全修订，需医生判断。","source_ids":[]}]
@@ -186,7 +186,12 @@ class ClinicalPipelineTests(unittest.TestCase):
         clinical=log["cases"][0]["clinical"]
         self.assertEqual(clinical["verification_status"],"completed_revision_unresolved")
         self.assertFalse(clinical["revision_applied"])
-        self.assertEqual(clinical["unresolved_claim_ids"],["C003"])
+        self.assertEqual(clinical["unresolved_claim_ids"],[])
+        self.assertIn("C003", clinical["detected_risks_before_output_guarantee"]
+                      ["unresolved_claim_ids"])
+        self.assertEqual(clinical["output_guarantee"]["level"],2)
+        self.assertNotIn("后续治疗方案需医生结合病情确认",
+                         output[0]["medical_record"]["review_items"])
 
     def test_reviser_cannot_introduce_unsupported_evidence_number(self):
         self.input.write_text(json.dumps([{"case_id":"C1","record_cutoff":"T0","sources":[
@@ -235,15 +240,16 @@ class ClinicalPipelineTests(unittest.TestCase):
         self.assertEqual(policy["ambiguous_fact_ids"],["F001"])
         self.assertEqual(log["cases"][0]["clinical"]["algorithm_mode"],"contrastive")
 
-    def test_invalid_plan_without_fallback_budget_fails_explicitly(self):
+    def test_invalid_plan_without_fallback_budget_uses_sources_guarantee(self):
         script=self.root/"one-response.json"
         script.write_text(json.dumps([{"content":json.dumps({"problems":[]})}]),encoding="utf-8")
         client=MockClient(script)
         case=Case("C", "T0", [Source("S1", "发热。")])
-        with self.assertRaises(CaseError) as raised:
-            run_case(case,client,"clinical_pipeline","text",1,
-                     clinical_verify=False,clinical_revise=False)
-        self.assertEqual(raised.exception.code,"CLINICAL_PLANNER_FALLBACK_BUDGET")
+        result,meta=run_case(case,client,"clinical_pipeline","text",1,
+                             clinical_verify=False,clinical_revise=False)
+        self.assertIn("发热", result["case_features"])
+        self.assertEqual(meta["clinical"]["output_guarantee"]["level"],4)
+        self.assertEqual(meta["calls"],1)
 
     def test_low_issue_does_not_trigger_revision_call(self):
         verdict=claims(); verdict["issues"]=[{

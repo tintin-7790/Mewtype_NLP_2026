@@ -15,18 +15,22 @@ from .errors import CaseError
 from .model_client import Budget, REVISER_SCHEMA, parse_model_json
 from .protocol import Case
 from .prompt_profiles import load_clinical_prompt
-from .validation import validate_record
+from .validation import GENERIC_REVISION_TEMPLATES, validate_record
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEXT_SECTIONS = {"case_features", "diagnostic_discussion", "plan"}
-TECHNICAL_REVIEW_TERMS = ("JSON", "API", "模型", "解析", "自动核验", "程序错误", "调用失败")
+TECHNICAL_REVIEW_TERMS = (
+    "JSON", "API", "模型生成错误", "解析失败", "自动核验", "程序错误", "调用失败",
+    "Fact ID", "Claim ID", "Problem ID", "来源编号", "Schema", "Verifier", "Prompt",
+)
 
 
 def run_local_revision(case: Case, record: dict, clinical_plan: dict, issues: list[dict],
                        retriever, retrieval_top_k: int, client, response_format: str,
                        budget: Budget, prompt_profile: str = "contrastive",
-                       prompt_audit: dict | None = None) -> tuple[dict, dict]:
+                       prompt_audit: dict | None = None,
+                       internal_ids: set[str] | None = None) -> tuple[dict, dict]:
     preparation_started = time.perf_counter()
     claim_map = {claim["claim_id"]: claim for claim in extract_claims(record)}
     target_ids = {issue["claim_id"] for issue in issues}
@@ -83,24 +87,29 @@ def run_local_revision(case: Case, record: dict, clinical_plan: dict, issues: li
                          "revised_claim_ids": patch_meta["revised_claim_ids"]})
     # Import locally to avoid a module cycle at import time.
     from .claim_verifier import deterministic_claim_issues
-    remaining = [item for item in deterministic_claim_issues(case, extract_claims(revised))
+    remaining = [item for item in deterministic_claim_issues(
+        case, extract_claims(revised), internal_ids,
+    )
                  if item.get("severity") == "high"]
-    if remaining:
-        raise CaseError("LOCAL_REVISION_UNRESOLVED_RISK",
-                        "局部修订后仍存在确定性高风险事实问题。",
-                        {"patch_applied": True,
-                         "remaining_claim_ids": [item["claim_id"] for item in remaining],
-                         "revised_claim_ids": patch_meta["revised_claim_ids"]})
+    remaining_ids = sorted({item["claim_id"] for item in remaining})
+    unresolved_ids = sorted(set(patch_meta["unresolved_claim_ids"]) | set(remaining_ids))
     target_sections = {issue["section"] for issue in issues}
     meta = {"strategy": "model_claim_patch",
             "target_sections": sorted(target_sections),
             "preserved_sections": sorted(section for section in TEXT_SECTIONS
                                          if revised[section] == record[section]),
             "revised_claim_ids": patch_meta["revised_claim_ids"],
-            "unresolved_claim_ids": patch_meta["unresolved_claim_ids"],
+            "unresolved_claim_ids": unresolved_ids,
             "review_items_added": patch_meta["review_items_added"],
             "source_count_sent": len(relevant_sources),
-            "amplitude": revision_amplitude(record, revised, target_sections)}
+            "amplitude": revision_amplitude(record, revised, target_sections),
+            "patch_acceptance": {
+                "targeted_claim_ids": sorted(target_ids),
+                "applied_claim_ids": patch_meta["revised_claim_ids"],
+                "all_targets_changed": not patch_meta["unresolved_claim_ids"],
+                "post_patch_high_risk_count": len(remaining),
+                "post_patch_high_risk_claim_ids": remaining_ids,
+            }}
     return revised, meta
 
 
@@ -134,8 +143,24 @@ def apply_revision(record: dict, revision, issues: list[dict]) -> tuple[dict, di
             raise CaseError("INVALID_LOCAL_REVISION", "replacement 必须是字符串。")
         if edit["action"] == "replace" and not replacement.strip():
             raise CaseError("INVALID_LOCAL_REVISION", "replace 必须提供非空 replacement。")
-        if claim["section"] in TEXT_SECTIONS and edit["action"] != "replace":
-            raise CaseError("LOCAL_REVISION_SCOPE_ERROR", "正文 Claim 只允许精确替换，不允许删除。")
+        if edit["action"] == "remove" and replacement:
+            raise CaseError("INVALID_LOCAL_REVISION", "remove 的 replacement 必须为空字符串。")
+        if edit["action"] == "replace" and replacement.strip() == claim["statement"].strip():
+            raise CaseError("LOCAL_REVISION_NO_EFFECT", "replacement 与原 Claim 相同，不能视为已修订。")
+        if claim["section"] in TEXT_SECTIONS and not _is_complete_text_claim(record, claim):
+            raise CaseError("LOCAL_REVISION_UNSAFE_SCOPE",
+                            "正文 Claim 不是完整句级范围，拒绝局部修订以避免破坏相邻文本。")
+        if (claim["section"] in TEXT_SECTIONS and edit["action"] == "remove"
+                and len([item for item in claim_map.values()
+                         if item["section"] == claim["section"]]) <= 1):
+            raise CaseError("LOCAL_REVISION_UNSAFE_SCOPE",
+                            "拒绝删除正文字段的唯一完整 Claim，应改为保守表述或交由输出保障层重建。")
+        if (edit["action"] == "replace"
+                and any(template in replacement for template in GENERIC_REVISION_TEMPLATES)):
+            raise CaseError("LOCAL_REVISION_GENERIC_TEMPLATE",
+                            "局部修订不得使用缺少具体临床对象的通用审稿模板。")
+        if edit["action"] == "replace" and not _balanced_brackets(replacement):
+            raise CaseError("LOCAL_REVISION_MALFORMED_TEXT", "replacement 存在括号不匹配。")
         edits_by_id[claim_id] = edit
     result = deepcopy(record)
     text_edits = []
@@ -170,17 +195,65 @@ def apply_conservative_fallback(record: dict, issues: list[dict]) -> tuple[dict,
     edits = []
     unresolved = []
     notes = []
+    preserved = []
     for issue in issues:
         claim = claim_map.get(issue.get("claim_id"))
         if claim is None:
             unresolved.append(issue.get("claim_id"))
+            preserved.append({"claim_id": issue.get("claim_id"), "section": issue.get("section"),
+                              "code": issue.get("error_type"), "reason": "claim_not_found"})
             continue
-        action = "remove" if claim["section"] == "evidence" else "replace"
+        error_type = issue.get("error_type")
+        if (claim["section"] == "review_items"
+                and error_type in ("TECHNICAL_REVIEW_ITEM", "INTERNAL_AUDIT_LEAK")):
+            action, replacement = "remove", ""
+        elif claim["section"] == "evidence":
+            action, replacement = "remove", ""
+        elif (claim["section"] in TEXT_SECTIONS
+              and error_type in ("UNKNOWN_AS_NEGATIVE", "NOT_ADDRESSED")):
+            replacement = _safe_unknown_status_rewrite(claim["statement"])
+            if replacement is None:
+                unresolved.append(claim["claim_id"])
+                preserved.append({"claim_id": claim["claim_id"], "section": claim["section"],
+                                  "code": error_type, "reason": "no_safe_deterministic_rewrite"})
+                continue
+            action = "replace"
+        elif (claim["section"] in TEXT_SECTIONS
+              and error_type == "UNSUPPORTED_NEGATIVE"):
+            replacement = _safe_unsupported_negative_rewrite(claim["statement"])
+            if replacement is None:
+                unresolved.append(claim["claim_id"])
+                preserved.append({"claim_id": claim["claim_id"], "section": claim["section"],
+                                  "code": error_type, "reason": "no_safe_deterministic_rewrite"})
+                continue
+            action = "replace"
+        elif (claim["section"] in TEXT_SECTIONS
+              and error_type == "DIAGNOSIS_CERTAINTY_UPGRADE"):
+            replacement = _safe_diagnosis_uncertainty_rewrite(claim["statement"])
+            if replacement is None:
+                unresolved.append(claim["claim_id"])
+                preserved.append({"claim_id": claim["claim_id"], "section": claim["section"],
+                                  "code": error_type, "reason": "no_safe_deterministic_rewrite"})
+                continue
+            action = "replace"
+        elif (claim["section"] == "plan"
+              and error_type == "UNSAFE_RECOMMENDATION"):
+            replacement = _safe_unsafe_recommendation_rewrite(claim["statement"])
+            if replacement is None:
+                unresolved.append(claim["claim_id"])
+                preserved.append({"claim_id": claim["claim_id"], "section": claim["section"],
+                                  "code": error_type, "reason": "no_safe_deterministic_rewrite"})
+                continue
+            action = "replace"
+        else:
+            unresolved.append(claim["claim_id"])
+            preserved.append({"claim_id": claim["claim_id"], "section": claim["section"],
+                              "code": error_type, "reason": "unsafe_for_automatic_fallback"})
+            continue
         edits.append({"claim_id": claim["claim_id"], "section": claim["section"],
-                      "action": action,
-                      "replacement": "" if action == "remove" else _fallback_text(issue.get("error_type"))})
-        hint = issue.get("revision_hint") or "相关事实需结合原始资料确认。"
-        notes.append(f"相关事实需医生确认：{hint}")
+                      "action": action, "replacement": replacement})
+        # The verifier's repair instruction is internal audit data, not a
+        # clinician-facing missing-information item.  Keep it in metadata only.
     try:
         result, patch_meta = apply_revision(
             record, {"edits": edits, "review_items_to_add": notes}, issues,
@@ -189,12 +262,14 @@ def apply_conservative_fallback(record: dict, issues: list[dict]) -> tuple[dict,
         return deepcopy(record), {"strategy": "deterministic_conservative_fallback",
                                   "applied": False, "revised_claim_ids": [],
                                   "unresolved_claim_ids": sorted({issue.get("claim_id") for issue in issues}),
+                                  "preserved_unsafe_claims": preserved,
                                   "amplitude": {}}
     unresolved.extend(patch_meta["unresolved_claim_ids"])
     target_sections = {issue.get("section") for issue in issues}
     return result, {"strategy": "deterministic_conservative_fallback", "applied": bool(edits),
                     "revised_claim_ids": patch_meta["revised_claim_ids"],
                     "unresolved_claim_ids": sorted(set(unresolved)),
+                    "preserved_unsafe_claims": preserved,
                     "amplitude": revision_amplitude(record, result, target_sections)}
 
 
@@ -217,7 +292,7 @@ def _coalesce_patch_targets(issues: list[dict]) -> list[dict]:
 def _contains_technical_status(note: str) -> bool:
     upper = note.upper()
     return ("JSON" in upper or "API" in upper
-            or any(term in note for term in TECHNICAL_REVIEW_TERMS[2:]))
+            or any(term.lower() in note.lower() for term in TECHNICAL_REVIEW_TERMS[2:]))
 
 
 def revision_amplitude(before: dict, after: dict, target_sections: set[str]) -> dict:
@@ -245,7 +320,113 @@ def _apply_text_edit(record: dict, claim: dict, edit: dict) -> None:
             raise CaseError("LOCAL_REVISION_LOCATOR_ERROR",
                             "无法唯一定位正文 Claim，未应用修订。")
         start, end = occurrences[0]
-    record[section] = text[:start] + edit["replacement"] + text[end:]
+    record[section] = (text[:start] + edit["replacement"] + text[end:]).strip()
+
+
+def _is_complete_text_claim(record: dict, claim: dict) -> bool:
+    text = record.get(claim.get("section"))
+    start, end = claim.get("span_start"), claim.get("span_end")
+    if (not isinstance(text, str) or not isinstance(start, int) or not isinstance(end, int)
+            or start < 0 or end <= start or end > len(text)
+            or text[start:end] != claim.get("statement")):
+        return False
+    left_ok = start == 0 or text[start - 1] in "。！？!?；;\r\n"
+    right_ok = end == len(text) or text[end - 1] in "。！？!?；;"
+    return left_ok and right_ok and _balanced_brackets(text[start:end])
+
+
+def _balanced_brackets(text: str) -> bool:
+    pairs = {")": "(", "）": "（", "]": "[", "】": "【", "}": "{"}
+    stack = []
+    for char in text:
+        if char in pairs.values():
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
+                return False
+    return not stack
+
+
+def _safe_unknown_status_rewrite(statement: str) -> str | None:
+    text = statement.strip()
+    patterns = (
+        (r"^当前尚未开始(.+?)[。！？!?]?$", "当前是否已开始{object}尚未明确，需医生确认。"),
+        (r"^当前未接受(.+?)[。！？!?]?$", "当前是否接受{object}尚未明确，需医生确认。"),
+        (r"^当前未进行(.+?)[。！？!?]?$", "当前是否进行{object}尚未明确，需医生确认。"),
+        (r"^当前未使用(.+?)[。！？!?]?$", "当前是否使用{object}尚未明确，需医生确认。"),
+    )
+    for pattern, template in patterns:
+        match = re.match(pattern, text)
+        if match and match.group(1).strip():
+            return template.format(object=match.group(1).strip())
+    return None
+
+
+def _safe_unsupported_negative_rewrite(statement: str) -> str | None:
+    """Downgrade only explicit exclusion language inside one complete Claim.
+
+    The caller has already proved that the Claim has an exact, balanced,
+    sentence-level locator.  These substitutions preserve the clinical object
+    and surrounding analysis; they never invent a new patient fact.
+    """
+    text = statement.strip()
+    replacement = text
+    # A bare ``排除`` is too strong when the source contains only a weak
+    # negative.  Existing qualified forms are deliberately left untouched.
+    replacement = re.sub(r"(?<!不能)(?<!无法)(?<!尚不能)(?<!未能)排除", "尚不能排除",
+                         replacement)
+    replacement = re.sub(
+        r"不支持([^，。；;！？!?]+)",
+        lambda match: f"据此尚不能排除{match.group(1).strip()}",
+        replacement,
+    )
+    replacement = re.sub(
+        r"削弱([^，。；;！？!?]+?)可能性",
+        lambda match: f"但据此尚不能排除{match.group(1).strip()}",
+        replacement,
+    )
+    if replacement == text or not replacement.strip() or not _balanced_brackets(replacement):
+        return None
+    return replacement
+
+
+def _safe_diagnosis_uncertainty_rewrite(statement: str) -> str | None:
+    """Turn an explicit certainty upgrade into a bounded diagnostic hypothesis."""
+    text = statement.strip()
+    ending = ""
+    if text and text[-1] in "。！？!?；;":
+        ending, text = text[-1], text[:-1]
+    patterns = ("已明确诊断为", "明确诊断为", "已确诊为", "确诊为", "诊断为", "患有")
+    replacement = text
+    for marker in patterns:
+        if marker in replacement:
+            replacement = replacement.replace(marker, "考虑", 1)
+            break
+    else:
+        return None
+    if not any(word in replacement for word in ("待排", "疑似", "可能", "初步诊断", "考虑")):
+        return None
+    replacement = replacement.rstrip("，, ") + "，尚待进一步检查确认" + (ending or "。")
+    if replacement == statement.strip() or not _balanced_brackets(replacement):
+        return None
+    return replacement
+
+
+def _safe_unsafe_recommendation_rewrite(statement: str) -> str | None:
+    """Remove imperative certainty while retaining the named clinical action."""
+    text = statement.strip()
+    patterns = (
+        r"^建议立即开展(.+?)[。！？!?]?$",
+        r"^立即开展(.+?)[。！？!?]?$",
+        r"^建议立即(?:给予|使用)(.+?)[。！？!?]?$",
+        r"^立即(?:给予|使用)(.+?)[。！？!?]?$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if match and match.group(1).strip():
+            clinical_action = match.group(1).strip().rstrip("。！？!?；;")
+            return (f"是否开展{clinical_action}需由医生结合病情、适应证及风险审慎评估。")
+    return None
 
 
 def _claim_start(record: dict, claim: dict) -> int:
@@ -292,24 +473,6 @@ def _select_relevant_sources(case: Case, issues: list[dict], retrieval_source_id
 def _changed_chars(left: str, right: str) -> int:
     matches = sum(block.size for block in SequenceMatcher(None, left, right).get_matching_blocks())
     return len(left) + len(right) - 2 * matches
-
-
-def _fallback_text(error_type: str | None) -> str:
-    if error_type in ("UNKNOWN_AS_NEGATIVE", "NOT_ADDRESSED", "UNSUPPORTED_NEGATIVE"):
-        return "相关检查或治疗状态未提供，需医生确认。"
-    if error_type == "DIAGNOSIS_CERTAINTY_UPGRADE":
-        return "该诊断目前仅为初步判断或待排，需结合后续资料确认。"
-    if error_type in ("PLAN_AS_COMPLETED", "RESULT_AS_AVAILABLE"):
-        return "相关检查或治疗尚处计划或结果待确认状态。"
-    if error_type in ("FACT_CONTRADICTION", "PATIENT_FACT_CONTRADICTION"):
-        return "该项患者事实存在冲突，需以原始资料复核结果为准。"
-    if error_type == "CORRECTION_IGNORED":
-        return "该项事实应以复核更正后的记录为准。"
-    if error_type in ("TIME_MISMATCH", "TEMPORAL_CONFLICT"):
-        return "该项时间信息需结合原始资料重新确认。"
-    if error_type in ("NUMERIC_VALUE_ERROR", "UNIT_ERROR"):
-        return "该项数值或单位需以原始资料为准。"
-    return "该项陈述依据不足，需医生结合原始资料确认。"
 
 
 def _messages(prompt_name: str, payload: dict) -> list[dict]:

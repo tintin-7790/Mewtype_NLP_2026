@@ -1,13 +1,23 @@
 {
   "environment": "local",
   "adapter": "mlx_direct",
-  "model": "/path/to/already-downloaded-qwen-snapshot",
+  "model": "REPLACE_WITH_EXISTING_LOCAL_QWEN_PATH",
   "response_format": "text",
   "fallback_response_formats": [],
   "temperature": 0.0,
   "top_p": 1.0,
-  "max_tokens": 2048,
+  "max_tokens": 8192,
   "max_retries": 0,
   "max_calls_per_case": 1,
-  "seed": 20261125
+  "seed": 20261125,
+  "stream": false,
+  "stage_generation_parameters": {
+    "model": {"max_tokens": 8192},
+    "planner": {"max_tokens": 8192},
+    "counter_evidence": {"max_tokens": 8192},
+    "writer": {"max_tokens": 12288},
+    "verifier": {"max_tokens": 8192},
+    "reviser": {"max_tokens": 8192},
+    "baseline_fallback": {"max_tokens": 8192}
+  }
 }

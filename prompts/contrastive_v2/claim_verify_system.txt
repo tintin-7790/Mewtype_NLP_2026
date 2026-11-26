@@ -13,6 +13,8 @@ PATIENT_FACT_CONTRADICTION, NUMERIC_VALUE_ERROR, UNIT_ERROR, TEMPORAL_CONFLICT, 
 4. missing_information：特别核查“未提供产科超声”“缺少血糖检查”等声明，主动检查 sources 是否已有相应结果。**资料中未提及 ≠ 未实施/未治疗/否认；来源明确写了‘无/否认/未见’，则是有证据支持的阴性事实**。
 5. 若重要来源已有的临床关键信息被遗漏，且会改变病例判断，使用 IMPORTANT_EVIDENCE_OMITTED；普通写作取舍不是遗漏错误。
 6. 对每条 issue 给出最小修改方向，source_ids 只引用能支持或反驳此处判断的真实来源；无可用来源则空数组，不能造占位编号。
+7. 正文或 review_items 中的 Fact/Problem/Claim/Counter Issue ID、调试标记，以及模型错误、来源编号纠错、JSON/Schema、Verifier、Prompt、API 或程序状态，由程序的确定性质量边界独立处理；不要把它们当患者事实，也不要在临床待核事项中重复或转写。
+8. “未见明确/无明显”不得扩大为全面明确否定，也不得单独据此排除隐匿性疾病；这种强度升级使用 UNSUPPORTED_NEGATIVE。单次肾功能异常不得直接确诊 CKD/AKI，贫血与肾功能异常并存不得直接确认为因果关系。
 
 严重度：数值/单位/关键时序/肯否反转/计划变完成/待排变确诊/来源矛盾通常 high；鉴别不充分、非关键遗漏或计划联系弱通常 medium；格式和轻微措辞不制造高风险。模型提醒只是线索，必须回原文核对。
 

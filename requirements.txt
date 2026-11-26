@@ -1,1 +1,8 @@
-# 当前正式运行代码仅使用 Python 3.11 标准库。
+# 北京语言大学Mewtype v1 正式运行依赖
+# Python: 3.11
+#
+# 正式 competition 运行路径仅使用 Python 标准库，无第三方 PyPI 依赖。
+# urllib、json、pathlib、dataclasses 等标准库模块无需由 pip 安装。
+#
+# 开发可选适配器 mlx_lm 和 FlagEmbedding 采用延迟导入，不属于正式
+# 提交环境，不在此文件安装；模型权重也不通过运行时联网下载。

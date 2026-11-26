@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 
 from .embedding_client import EmbeddingClient
@@ -70,6 +71,10 @@ class DenseEvidenceRetriever:
         self._texts_at_start = client.total_texts
         self._elapsed_at_start = client.elapsed_ms
 
+    @property
+    def provider_name(self) -> str:
+        return type(self.client).__name__
+
     def retrieve(self, statement: str, top_k: int = 3) -> list[EvidenceCandidate]:
         if top_k <= 0 or not statement.strip() or not self.units:
             return []
@@ -109,6 +114,93 @@ class DenseEvidenceRetriever:
     def _ensure_index(self) -> None:
         if self._source_vectors is None:
             self._source_vectors = self.client.embed([unit.text for unit in self.units]) if self.units else []
+
+
+class LexicalEvidenceRetriever:
+    """Dependency-free, case-scoped BM25 seed retrieval for Graph PPR.
+
+    Chinese character unigrams/bigrams and ASCII word tokens are used only to
+    locate source fragments.  The lexical score is not evidence validation and
+    never changes source IDs, facts, or graph relations.
+    """
+
+    provider_name = "lexical_bm25_cpu"
+
+    def __init__(self, case: Case, *, max_chunk_chars: int = 240,
+                 min_score: float = 0.0, k1: float = 1.5, b: float = 0.75):
+        if max_chunk_chars < 40:
+            raise ValueError("max_chunk_chars must be at least 40")
+        if min_score < 0:
+            raise ValueError("min_score must be non-negative")
+        self.case = case
+        self.max_chunk_chars = max_chunk_chars
+        self.min_score = min_score
+        self.k1 = k1
+        self.b = b
+        self.units = build_retrieval_units(case, max_chunk_chars=max_chunk_chars)
+        self._documents = [Counter(_lexical_tokens(unit.text)) for unit in self.units]
+        self._lengths = [sum(document.values()) for document in self._documents]
+        self._average_length = (sum(self._lengths) / len(self._lengths)
+                                if self._lengths else 0.0)
+        self._document_frequency = Counter()
+        for document in self._documents:
+            self._document_frequency.update(document.keys())
+        self._result_cache: dict[tuple[str, int], list[EvidenceCandidate]] = {}
+        self.query_count = 0
+        self.elapsed_ms = 0.0
+
+    def retrieve(self, statement: str, top_k: int = 3) -> list[EvidenceCandidate]:
+        if top_k <= 0 or not statement.strip() or not self.units:
+            return []
+        cache_key = (statement, top_k)
+        if cache_key in self._result_cache:
+            return list(self._result_cache[cache_key])
+        import time
+        started = time.perf_counter()
+        self.query_count += 1
+        query_tokens = set(_lexical_tokens(statement))
+        query_meta = _semantic_metadata(statement)
+        ranked = []
+        for unit, document, length in zip(self.units, self._documents, self._lengths):
+            raw_score = sum(self._bm25(token, document, length) for token in query_tokens)
+            if raw_score <= self.min_score:
+                continue
+            # EvidenceCandidate and GraphGuidedRetriever expect a bounded
+            # similarity-like value.  This monotonic transform preserves rank.
+            score = raw_score / (raw_score + 1.0)
+            ranked.append(EvidenceCandidate(
+                unit, score, _compatibility_warnings(query_meta, unit),
+            ))
+        ranked.sort(key=lambda item: (-item.similarity, item.unit.ordinal))
+        self._result_cache[cache_key] = ranked[:top_k]
+        self.elapsed_ms += (time.perf_counter() - started) * 1000
+        return list(self._result_cache[cache_key])
+
+    def stats(self) -> dict:
+        return {
+            "provider": self.provider_name,
+            "embedding_calls": 0,
+            "embedded_texts": 0,
+            "embedding_elapsed_ms": 0.0,
+            "retrieval_elapsed_ms": round(self.elapsed_ms, 2),
+            "retrieval_queries": self.query_count,
+            "indexed_units": len(self.units),
+            "result_cache_entries": len(self._result_cache),
+        }
+
+    def _bm25(self, token: str, document: Counter, document_length: int) -> float:
+        frequency = document.get(token, 0)
+        if not frequency:
+            return 0.0
+        document_count = len(self._documents)
+        document_frequency = self._document_frequency[token]
+        inverse_frequency = math.log(
+            1.0 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5)
+        )
+        normalizer = frequency + self.k1 * (
+            1.0 - self.b + self.b * document_length / max(self._average_length, 1.0)
+        )
+        return inverse_frequency * frequency * (self.k1 + 1.0) / normalizer
 
 
 def build_retrieval_units(case: Case, *, max_chunk_chars: int = 240) -> list[RetrievalUnit]:
@@ -196,3 +288,14 @@ def _compatibility_warnings(query: dict, unit: RetrievalUnit) -> tuple[str, ...]
     if query["time"] and unit.time and query["time"] != unit.time:
         warnings.append("time_mismatch")
     return tuple(warnings)
+
+
+def _lexical_tokens(text: str) -> list[str]:
+    lowered = text.lower()
+    ascii_tokens = re.findall(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*", lowered)
+    chinese_runs = re.findall(r"[\u3400-\u9fff]+", lowered)
+    chinese_tokens = []
+    for run in chinese_runs:
+        chinese_tokens.extend(run)
+        chinese_tokens.extend(run[index:index + 2] for index in range(len(run) - 1))
+    return ascii_tokens + chinese_tokens

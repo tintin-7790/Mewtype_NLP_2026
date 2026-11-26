@@ -2,7 +2,9 @@
 
 ## 1. 实施边界
 
-本轮按顺序接入三个彼此独立、默认关闭的研究模块：
+本报告记录三个彼此独立模块最初接入时的离线验收。自 `0.4.9` 当前开发配置起，Prompt 已正式选定为 `contrastive_v2`，完整本地开发 Profile 默认同时启用写作知识和 Shared Clinical Memory；普通高级 CLI 与正式 competition Profile 仍默认关闭这些附加模块。
+
+最初接入的三个模块为：
 
 1. 五阶段 `contrastive_v2` Prompt；
 2. Writer 临床写作规则与原创合成示例风格提要；
@@ -101,9 +103,9 @@ Verifier 和 Reviser 函数不接收 Shared Memory 参数，仍以当前病例�
 
 全量测试为 `176/176` 通过。Python 3.11 编译、资源 JSON 解析与 `git diff --check` 通过。测试全部离线。
 
-## 7. 真实 A/B 命令
+## 7. 历史 A/B 命令（不再是当前运行要求）
 
-以下命令会调用真实开发 API，当前未执行。运行前确保 Mac 终端已有 `DASHSCOPE_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL`。每轮使用不同输出和日志，固定同一输入、模型参数与 response format。
+以下命令仅保留作历史研究记录，当前不再安排 Prompt v1/v2 对照。日常本地运行应设置 `MEWTYPE_DEV_MODE=1` 后使用统一两参数命令。本轮没有调用付费 API。
 
 ### 7.1 Prompt v1 对 v2（其他两模块关闭）
 

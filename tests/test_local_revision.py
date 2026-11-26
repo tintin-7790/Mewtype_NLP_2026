@@ -75,6 +75,41 @@ class LocalRevisionTests(unittest.TestCase):
         self.assertGreater(meta["amplitude"]["plan"]["changed_char_estimate"], 0)
         self.assertNotIn("before_text", meta["amplitude"]["plan"])
 
+    def test_conservative_fallback_qualifies_unsupported_exclusion(self):
+        before = record("建议完善相关检查。")
+        before["diagnostic_discussion"] = "影像未见明确感染征象，排除肺炎。"
+        target = next(item for item in extract_claims(before)
+                      if item["section"] == "diagnostic_discussion")
+        issue = {**target, "error_type": "UNSUPPORTED_NEGATIVE", "severity": "high",
+                 "revision_hint": "不得依据弱阴性排除。", "source_ids": ["S1"]}
+        after, meta = apply_conservative_fallback(before, [issue])
+        self.assertEqual(after["diagnostic_discussion"],
+                         "影像未见明确感染征象，尚不能排除肺炎。")
+        self.assertEqual(meta["unresolved_claim_ids"], [])
+        self.assertEqual(after["case_features"], before["case_features"])
+
+    def test_conservative_fallback_downgrades_diagnosis_certainty(self):
+        before = record("建议完善相关检查。")
+        before["diagnostic_discussion"] = "患者诊断为肺炎。"
+        target = next(item for item in extract_claims(before)
+                      if item["section"] == "diagnostic_discussion")
+        issue = {**target, "error_type": "DIAGNOSIS_CERTAINTY_UPGRADE", "severity": "high",
+                 "revision_hint": "恢复待确认性质。", "source_ids": []}
+        after, meta = apply_conservative_fallback(before, [issue])
+        self.assertEqual(after["diagnostic_discussion"],
+                         "患者考虑肺炎，尚待进一步检查确认。")
+        self.assertEqual(meta["unresolved_claim_ids"], [])
+
+    def test_conservative_fallback_qualifies_locatable_unsafe_recommendation(self):
+        before = record("建议立即开展未经评估的高风险操作。")
+        target = next(item for item in extract_claims(before) if item["section"] == "plan")
+        issue = {**target, "error_type": "UNSAFE_RECOMMENDATION", "severity": "high",
+                 "revision_hint": "改为条件性建议。", "source_ids": []}
+        after, meta = apply_conservative_fallback(before, [issue])
+        self.assertEqual(after["plan"],
+                         "是否开展未经评估的高风险操作需由医生结合病情、适应证及风险审慎评估。")
+        self.assertEqual(meta["unresolved_claim_ids"], [])
+
     def test_repeated_text_edits_only_the_claim_span_selected(self):
         before = record("需复核。中间内容保持。需复核。")
         plan_claims = [item for item in extract_claims(before) if item["section"] == "plan"]

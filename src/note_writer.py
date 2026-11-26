@@ -34,8 +34,12 @@ def run_note_writer(case: Case, facts: list[dict], clinical_plan: dict, evidence
     else:
         problem_context = build_problem_evidence_context(facts, clinical_plan, evidence_bundles)
         attach_counter_review(problem_context, counter_review)
-        payload = {**shared, "clinical_plan": clinical_plan,
-                   "problem_evidence_context": problem_context}
+        payload = {**shared, "problem_evidence_context": problem_context}
+        if prompt_profile != "contrastive_v2":
+            # Preserve the established v1 contrastive/few-shot input contract.
+            # v2 uses the resolved problem context plus Writer-specific memory
+            # and intentionally avoids duplicating the full plan.
+            payload["clinical_plan"] = clinical_plan
     case_text = "\n".join(source.content for source in case.sources)
     selected_tags: set[str] = set()
     exemplar_ids: list[str] = []
@@ -60,6 +64,10 @@ def run_note_writer(case: Case, facts: list[dict], clinical_plan: dict, evidence
         payload["shared_decision_cards"] = shared_memory_context
     system, example_id = load_clinical_prompt("writer", prompt_profile, case_text)
     if prompt_audit is not None:
+        decision_cards = (shared_memory_context.get("decision_cards", [])
+                          if isinstance(shared_memory_context, dict) else [])
+        clinical_focus = (shared_memory_context.get("case_clinical_focus", {})
+                          if isinstance(shared_memory_context, dict) else {})
         prompt_audit["writer"] = {"profile": prompt_profile, "fewshot_example_id": example_id,
                                   "system_prompt_chars": len(system),
                                   "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
@@ -68,6 +76,20 @@ def run_note_writer(case: Case, facts: list[dict], clinical_plan: dict, evidence
                                   "writing_guidance_tags": sorted(selected_tags),
                                   "writing_exemplar_ids": exemplar_ids,
                                   "shared_memory_injected": shared_memory_context is not None,
+                                  "problem_context_count": len(
+                                      payload.get("problem_evidence_context", {}).get("problems", [])
+                                  ),
+                                  "shared_memory_card_count": len(decision_cards),
+                                  "shared_memory_problem_ids": [
+                                      card.get("problem_id") for card in decision_cards
+                                      if isinstance(card, dict)
+                                  ],
+                                  "clinical_focus_counts": {
+                                      key: len(value) for key, value in clinical_focus.items()
+                                      if isinstance(value, list)
+                                  },
+                                  "clinical_focus_truncated_reference_counts":
+                                      clinical_focus.get("truncated_reference_counts", {}),
                                   "preparation_elapsed_ms": round(
                                       (time.perf_counter() - preparation_started) * 1000, 3)}
     messages = _messages(system, payload)

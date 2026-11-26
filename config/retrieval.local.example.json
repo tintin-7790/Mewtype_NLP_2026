@@ -1,6 +1,6 @@
 {
   "provider": "local_bge",
-  "model": "/absolute/path/to/already-downloaded/bge-m3",
+  "model": "REPLACE_WITH_EXISTING_LOCAL_BGE_M3_PATH",
   "allow_download": false,
   "use_fp16": false,
   "batch_size": 12,

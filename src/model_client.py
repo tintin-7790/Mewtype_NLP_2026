@@ -1,4 +1,5 @@
 import json
+import http.client
 import os
 import re
 import socket
@@ -113,6 +114,10 @@ REVISER_SCHEMA = {"name": "localized_claim_patch", "strict": True, "schema": {
     }}}
 
 
+class _ChatResponseError(ValueError):
+    pass
+
+
 class Budget:
     def __init__(self, maximum: int): self.maximum, self.calls = maximum, 0
     @property
@@ -162,63 +167,172 @@ class ChatCompletionsClient:
         self.config = config; self.total_calls = 0; self.total_usage = _empty_usage()
         self.format_attempts: list[str] = []; self.last_response_format: str | None = None
         self.debug_hook = None; self.call_events: list[dict] = []
+        self._thinking_disabled_by_compatibility = False
     def call(self, messages, response_format, budget: Budget, *, stage="model", schema=None):
-        formats = [response_format] + list(self.config.fallback_response_formats)
+        formats = list(dict.fromkeys(
+            [response_format] + list(self.config.fallback_response_formats)
+        ))
         last = None
         for fmt in formats:
-            try: return self._request(messages, fmt, budget, stage, schema)
-            except CaseError as exc: last = exc
+            try:
+                return self._request(messages, fmt, budget, stage, schema)
+            except CaseError as exc:
+                last = exc
+                # Alternate response formats are only meaningful when the
+                # service explicitly rejected that format.  A timeout or
+                # malformed response must not silently spend another call.
+                if exc.code != "RESPONSE_FORMAT_REJECTED":
+                    raise
         raise last or CaseError("MODEL_ERROR", "模型调用失败。")
+
     def _request(self, messages, fmt, budget, stage, schema):
-        body = {"model": self.config.model, "messages": messages, "stream": False}
-        if self.config.send_generation_parameters:
-            body.update({"temperature": self.config.temperature, "top_p": self.config.top_p,
-                         "max_tokens": self.config.max_tokens, "seed": self.config.seed})
-        body.update(self.config.extra_body)
-        if fmt == "json_object": body["response_format"] = {"type": "json_object"}
-        elif fmt == "json_schema":
-            selected_schema = schema or MEDICAL_SCHEMA
-            body["response_format"] = {"type": "json_schema", "json_schema": selected_schema}
+        generation = self.config.generation_for(stage)
         headers = self._headers()
         prompt_metrics = _message_metrics(messages)
-        request = urllib.request.Request(self.config.endpoint, json.dumps(body).encode(), headers, method="POST")
-        for attempt in range(self.config.max_retries + 1):
-            budget.take(); self.total_calls += 1; self.format_attempts.append(fmt)
+        transport_attempt = 0
+        compatibility_retry = False
+        while True:
+            body = self._request_body(messages, fmt, schema, generation)
+            effective_generation = _effective_generation_audit(
+                body, generation, self.config.send_generation_parameters,
+            )
+            request = urllib.request.Request(
+                self.config.endpoint, json.dumps(body).encode(), headers, method="POST",
+            )
+            budget.take()
+            self.total_calls += 1
+            self.format_attempts.append(fmt)
             request_started = time.perf_counter()
             try:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                self._record_usage(payload.get("usage"))
-                content = payload["choices"][0]["message"]["content"]
-                finish_reason = payload["choices"][0].get("finish_reason")
+                    if generation["stream"]:
+                        parsed = _extract_streaming_chat_completion(response)
+                    else:
+                        payload = json.loads(response.read().decode("utf-8"))
+                        parsed = _extract_chat_completion(payload)
+                self._record_usage(parsed["usage"])
                 self.last_response_format = fmt
-                self._record_call_event(stage, fmt, True, payload.get("usage"), request_started,
-                                        prompt_metrics=prompt_metrics, finish_reason=finish_reason)
+                self._record_call_event(
+                    stage, fmt, True, parsed["usage"], request_started,
+                    prompt_metrics=prompt_metrics,
+                    finish_reason=parsed["finish_reason"],
+                    generation=effective_generation,
+                    compatibility_retry=compatibility_retry,
+                    reasoning_content_present=parsed["reasoning_content_present"],
+                    reasoning_content_chars=parsed["reasoning_content_chars"],
+                )
                 self._debug({"event": "response", "model": self.config.model,
-                             "stage": stage, "requested_response_format": fmt, "content": content,
-                             "usage": payload.get("usage", {})})
-                return content
+                             "stage": stage, "requested_response_format": fmt,
+                             "content": parsed["content"], "usage": parsed["usage"],
+                             "reasoning_content_present": parsed["reasoning_content_present"]})
+                # reasoning_content is intentionally never used as the final
+                # JSON and is never copied into the normal or raw-response log.
+                return parsed["content"]
             except urllib.error.HTTPError as exc:
                 body_text = exc.read().decode("utf-8", errors="replace")[:4000]
-                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__, prompt_metrics)
+                downgrade_eligible = self._can_downgrade_thinking(exc, body_text, body)
+                can_downgrade = downgrade_eligible and budget.remaining > 0
+                self._record_call_event(
+                    stage, fmt, False, None, request_started, type(exc).__name__,
+                    prompt_metrics, generation=effective_generation,
+                    compatibility_retry=compatibility_retry,
+                    compatibility_downgrade_triggered=can_downgrade,
+                    compatibility_downgrade_blocked_by_budget=(
+                        downgrade_eligible and not can_downgrade
+                    ),
+                )
                 self._debug({"event": "http_error", "model": self.config.model, "stage": stage,
                              "requested_response_format": fmt, "http_status": exc.code,
                              "service_error": body_text})
+                if can_downgrade:
+                    # One physical retry is allowed, counted against the same
+                    # per-case budget.  The capability decision is cached so
+                    # later stages do not repeat the rejected parameter.
+                    self._thinking_disabled_by_compatibility = True
+                    compatibility_retry = True
+                    continue
                 if 400 <= exc.code < 500:
                     code = "RESPONSE_FORMAT_REJECTED" if fmt in ("json_object", "json_schema") else "MODEL_HTTP_ERROR"
                     raise CaseError(code, f"模型接口 HTTP {exc.code}，请求格式={fmt}；未执行格式回退。") from exc
-                if attempt == self.config.max_retries:
+                if transport_attempt >= self.config.max_retries:
                     raise CaseError("MODEL_HTTP_ERROR", f"模型接口 HTTP {exc.code}，请求格式={fmt}。") from exc
-            except (urllib.error.URLError, socket.timeout, TimeoutError, KeyError, ValueError) as exc:
-                self._record_call_event(stage, fmt, False, None, request_started, type(exc).__name__, prompt_metrics)
+                transport_attempt += 1
+            except (urllib.error.URLError, socket.timeout, TimeoutError,
+                    http.client.HTTPException, ConnectionError) as exc:
+                self._record_call_event(
+                    stage, fmt, False, None, request_started, type(exc).__name__,
+                    prompt_metrics, generation=effective_generation,
+                    compatibility_retry=compatibility_retry,
+                )
                 self._debug({"event": "client_error", "model": self.config.model, "stage": stage,
                              "requested_response_format": fmt, "error_type": type(exc).__name__})
-                if attempt == self.config.max_retries:
+                if transport_attempt >= self.config.max_retries:
                     code = "MODEL_TIMEOUT" if _is_timeout_error(exc) else "MODEL_ERROR"
                     raise CaseError(code, f"模型接口失败：{type(exc).__name__}") from exc
+                transport_attempt += 1
+            except (json.JSONDecodeError, UnicodeError, _ChatResponseError) as exc:
+                self._record_call_event(
+                    stage, fmt, False, None, request_started, type(exc).__name__,
+                    prompt_metrics, generation=effective_generation,
+                    compatibility_retry=compatibility_retry,
+                )
+                self._debug({"event": "invalid_response", "model": self.config.model,
+                             "stage": stage, "requested_response_format": fmt,
+                             "error_type": type(exc).__name__})
+                raise CaseError(
+                    "MODEL_INVALID_RESPONSE",
+                    f"模型接口返回无效 Chat Completions 响应：{type(exc).__name__}",
+                ) from exc
+
+    def _request_body(self, messages, fmt, schema, generation):
+        if not isinstance(self.config.extra_body, dict):
+            raise TaskError("CONFIG_INVALID", "extra_body 必须是对象。")
+        body = dict(self.config.extra_body)
+        body.update({"model": self.config.model, "messages": messages,
+                     "stream": generation["stream"]})
+        if self.config.send_generation_parameters:
+            body.update({"temperature": generation["temperature"],
+                         "top_p": generation["top_p"],
+                         "max_tokens": generation["max_tokens"],
+                         "seed": generation["seed"]})
+            template_kwargs = body.get("chat_template_kwargs", {})
+            if not isinstance(template_kwargs, dict):
+                raise TaskError("CONFIG_INVALID", "chat_template_kwargs 必须是对象。")
+            template_kwargs = dict(template_kwargs)
+            if self._thinking_disabled_by_compatibility:
+                template_kwargs.pop("enable_thinking", None)
+            elif generation["enable_thinking"] is not None:
+                template_kwargs["enable_thinking"] = generation["enable_thinking"]
+            if template_kwargs:
+                body["chat_template_kwargs"] = template_kwargs
+            else:
+                body.pop("chat_template_kwargs", None)
+        if fmt == "json_object":
+            body["response_format"] = {"type": "json_object"}
+        elif fmt == "json_schema":
+            selected_schema = schema or MEDICAL_SCHEMA
+            body["response_format"] = {"type": "json_schema", "json_schema": selected_schema}
+        else:
+            body.pop("response_format", None)
+        return body
+
+    def _can_downgrade_thinking(self, exc, body_text, body) -> bool:
+        if (not self.config.compatibility_retry_without_thinking
+                or self._thinking_disabled_by_compatibility
+                or exc.code not in (400, 422)
+                or "chat_template_kwargs" not in body):
+            return False
+        lowered = body_text.lower()
+        return "enable_thinking" in lowered or "chat_template_kwargs" in lowered
 
     def _record_call_event(self, stage, fmt, success, usage, started, error_type=None,
-                           prompt_metrics=None, finish_reason=None):
+                           prompt_metrics=None, finish_reason=None, generation=None,
+                           compatibility_retry=False,
+                           compatibility_downgrade_triggered=False,
+                           compatibility_downgrade_blocked_by_budget=False,
+                           reasoning_content_present=False,
+                           reasoning_content_chars=0):
+        generation = generation or {}
         self.call_events.append({"stage": stage, "model": self.config.model, "response_format": fmt,
                                  "call_success": success, "json_parse_success": None,
                                  "parse_error_type": None, "parse_error_position": None,
@@ -226,8 +340,16 @@ class ChatCompletionsClient:
                                  "token_usage": _safe_usage(usage),
                                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
                                  "call_error_type": error_type, "finish_reason": finish_reason,
-                                 "max_tokens": (self.config.max_tokens
-                                                if self.config.send_generation_parameters else None),
+                                 "max_tokens": generation.get("max_tokens"),
+                                 "generation_parameters": generation,
+                                 "timeout_seconds": self.config.timeout_seconds,
+                                 "compatibility_retry": compatibility_retry,
+                                 "compatibility_downgrade_triggered":
+                                     compatibility_downgrade_triggered,
+                                 "compatibility_downgrade_blocked_by_budget":
+                                     compatibility_downgrade_blocked_by_budget,
+                                 "reasoning_content_present": reasoning_content_present,
+                                 "reasoning_content_chars": reasoning_content_chars,
                                  **(prompt_metrics or {})})
 
     def record_parse_result(self, stage, success, error_type=None, position=None):
@@ -275,6 +397,9 @@ class MlxDirectClient:
         self.config = config; self._loaded = None; self.total_calls = 0; self.total_usage = _empty_usage(); self.call_events = []
     def call(self, messages, response_format, budget: Budget, *, stage="model", schema=None):
         if response_format != "text": raise CaseError("UNSUPPORTED_RESPONSE_FORMAT", "MLX 直接适配器当前仅验证 text。")
+        generation = self.config.generation_for(stage)
+        if generation["stream"]:
+            raise CaseError("UNSUPPORTED_STREAM", "MLX 直接适配器当前仅支持非流式生成。")
         budget.take(); self.total_calls += 1
         try:
             from mlx_lm import generate, load
@@ -288,13 +413,22 @@ class MlxDirectClient:
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         prompt_metrics = _message_metrics(messages)
         try:
-            result = generate(model, tokenizer, prompt=prompt, max_tokens=self.config.max_tokens, verbose=False)
+            result = generate(model, tokenizer, prompt=prompt,
+                              max_tokens=generation["max_tokens"], verbose=False)
             self.call_events.append({"stage": stage, "model": self.config.model, "response_format": response_format,
                                      "call_success": True, "json_parse_success": None,
                                      "parse_error_type": None, "parse_error_position": None,
                                      "schema_validation_success": None, "schema_error_type": None,
                                      "token_usage": _empty_usage(), "elapsed_ms": 0.0, "call_error_type": None,
-                                     "finish_reason": None, "max_tokens": self.config.max_tokens})
+                                     "finish_reason": None, "max_tokens": generation["max_tokens"],
+                                     "generation_parameters": {
+                                         "max_tokens": generation["max_tokens"],
+                                         "stream": False,
+                                         "enable_thinking": None,
+                                     },
+                                     "timeout_seconds": None,
+                                     "reasoning_content_present": False,
+                                     "reasoning_content_chars": 0})
             self.call_events[-1].update(prompt_metrics)
             return result
         except Exception as exc:
@@ -347,6 +481,111 @@ def parse_model_json(text: str, *, stage: str = "model", client=None):
 
 def _empty_usage():
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _extract_chat_completion(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise _ChatResponseError("response root is not an object")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise _ChatResponseError("choices[0] is missing")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise _ChatResponseError("choices[0].message is missing")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise _ChatResponseError("message.content is not text")
+    reasoning = message.get("reasoning_content")
+    return {
+        "content": content,
+        "finish_reason": choice.get("finish_reason"),
+        "usage": payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
+        "reasoning_content_present": reasoning is not None,
+        "reasoning_content_chars": len(reasoning) if isinstance(reasoning, str) else 0,
+    }
+
+
+def _extract_streaming_chat_completion(response) -> dict:
+    content_parts: list[str] = []
+    content_seen = False
+    reasoning_present = False
+    reasoning_chars = 0
+    finish_reason = None
+    usage = {}
+    data_seen = False
+    for raw_line in response:
+        if not isinstance(raw_line, (bytes, bytearray)):
+            raise _ChatResponseError("stream line is not bytes")
+        line = bytes(raw_line).decode("utf-8").strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        if not isinstance(chunk, dict):
+            raise _ChatResponseError("stream chunk is not an object")
+        if isinstance(chunk.get("error"), dict):
+            raise _ChatResponseError("stream returned an error object")
+        data_seen = True
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        if not isinstance(choices, list) or not isinstance(choices[0], dict):
+            raise _ChatResponseError("stream choices[0] is invalid")
+        choice = choices[0]
+        delta = choice.get("delta")
+        if delta is None:
+            delta = choice.get("message")
+        if not isinstance(delta, dict):
+            raise _ChatResponseError("stream delta is invalid")
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_seen = True
+            content_parts.append(content)
+        elif content is not None:
+            raise _ChatResponseError("stream content is not text")
+        reasoning = delta.get("reasoning_content")
+        if reasoning is not None:
+            reasoning_present = True
+            if isinstance(reasoning, str):
+                reasoning_chars += len(reasoning)
+        if choice.get("finish_reason") is not None:
+            finish_reason = choice.get("finish_reason")
+    if not data_seen or not content_seen:
+        raise _ChatResponseError("stream contains no final content")
+    return {
+        "content": "".join(content_parts),
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "reasoning_content_present": reasoning_present,
+        "reasoning_content_chars": reasoning_chars,
+    }
+
+
+def _effective_generation_audit(body: dict, configured: dict,
+                                parameters_sent: bool) -> dict:
+    if not parameters_sent:
+        return {"stream": bool(body.get("stream")), "parameters_sent": False,
+                "max_tokens": None, "enable_thinking": None}
+    template_kwargs = body.get("chat_template_kwargs")
+    enable_thinking = (template_kwargs.get("enable_thinking")
+                       if isinstance(template_kwargs, dict) else None)
+    return {
+        "temperature": body.get("temperature"),
+        "top_p": body.get("top_p"),
+        "max_tokens": body.get("max_tokens"),
+        "seed": body.get("seed"),
+        "stream": bool(body.get("stream")),
+        "enable_thinking": enable_thinking,
+        "parameters_sent": True,
+        "configured_enable_thinking": configured.get("enable_thinking"),
+    }
 
 
 def _message_metrics(messages) -> dict:

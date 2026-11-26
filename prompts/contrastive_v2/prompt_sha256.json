@@ -1,12 +1,12 @@
 {
   "hash_algorithm": "sha256",
   "source_bundle": "Mewtype_Prompt_v2_SharedMemory_Examples.zip",
-  "integrity_note": "These hashes were calculated from the actual ZIP members at integration time. The ZIP's supplied prompt_sha256.json did not match its members and is therefore not used as the integrity authority.",
+  "integrity_note": "The ZIP-supplied manifest did not match its members. These hashes were recalculated from the integrated files after Final Quality Gate v1 and the full first-course-record Writer update.",
   "files": {
     "planner_system.txt": "ff7270e571a37421d2895a6b897671e929cc94c9c2049bbd644e9fccb70573a0",
     "counter_evidence_system.txt": "f5c3a5c6594737c86ebbe06b20dba513c49d8015584428632ea93a63deaa7627",
-    "writer_system.txt": "1a134a9d1a1f8b228a5171b3d7d62b7211c33ff24d59b6fb18fd747c6b76b757",
-    "claim_verify_system.txt": "e632f7245d41f4bb57234d66d199d9a4fe137fab530ba719149ab3ea6851c5eb",
-    "revise_system.txt": "6a229932c86f4072ccf2c5193e0197bf23ebbc1cb22ecfc91184618327530075"
+    "writer_system.txt": "61146b3414883263d36dfe068face18e30bba34d80a1eab85f535c9f41822a2d",
+    "claim_verify_system.txt": "a7d04f933ffbda9c0e1826740da4e905b09da8aacf69e775bd032a20618fb6d4",
+    "revise_system.txt": "5a690fd634715b93aa5cd352cfd830bf40edb201fffe5ce3208c8485b2c48f7e"
   }
 }

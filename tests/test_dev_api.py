@@ -1,7 +1,9 @@
 import json
 import io
 import os
+import sys
 import tempfile
+import types
 import unittest
 import urllib.error
 from contextlib import redirect_stderr
@@ -12,7 +14,7 @@ from src.app import main
 from src.config import ModelConfig, load_config
 from src.errors import CaseError, TaskError
 from src.model_client import (Budget, ChatCompletionsClient, DevApiChatCompletionsClient,
-                              MEDICAL_SCHEMA, PLANNER_SCHEMA)
+                              MEDICAL_SCHEMA, MlxDirectClient, PLANNER_SCHEMA)
 
 
 class FakeResponse:
@@ -20,6 +22,18 @@ class FakeResponse:
     def __enter__(self): return self
     def __exit__(self, *args): return False
     def read(self): return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
+
+class FakeStreamResponse:
+    def __init__(self, chunks): self.chunks = chunks
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def __iter__(self):
+        for chunk in self.chunks:
+            if chunk == "[DONE]":
+                yield b"data: [DONE]\n\n"
+            else:
+                yield ("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n").encode()
 
 
 def valid_record():
@@ -105,6 +119,170 @@ class DevApiTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=fake_open):
             ChatCompletionsClient(config).call([], "text", Budget(1))
         self.assertIsNone(captured["request"].get_header("Authorization"))
+
+    def test_stage_policy_sends_thinking_and_timeout_then_ignores_reasoning_text(self):
+        captured = {}
+        payload = {"choices": [{"message": {"reasoning_content": "private reasoning",
+                                                "content": "{}"},
+                                 "finish_reason": "stop"}]}
+        def fake_open(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse(payload)
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions", timeout_seconds=901,
+            stage_generation_parameters={
+                "writer": {"max_tokens": 12288, "enable_thinking": True},
+            },
+        )
+        client = ChatCompletionsClient(config)
+        debug_events = []
+        client.debug_hook = debug_events.append
+        with patch("urllib.request.urlopen", side_effect=fake_open):
+            result = client.call([], "text", Budget(1), stage="writer")
+        self.assertEqual(result, "{}")
+        self.assertEqual(captured["timeout"], 901)
+        self.assertEqual(captured["body"]["max_tokens"], 12288)
+        self.assertEqual(captured["body"]["chat_template_kwargs"],
+                         {"enable_thinking": True})
+        self.assertTrue(client.call_events[0]["reasoning_content_present"])
+        self.assertEqual(client.call_events[0]["reasoning_content_chars"], 17)
+        self.assertNotIn("private reasoning", json.dumps(debug_events))
+
+    def test_missing_final_content_is_invalid_even_when_reasoning_is_present(self):
+        payload = {"choices": [{"message": {"reasoning_content": "reasoning only"}}]}
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions",
+        )
+        with patch("urllib.request.urlopen", return_value=FakeResponse(payload)):
+            with self.assertRaises(CaseError) as caught:
+                ChatCompletionsClient(config).call([], "text", Budget(1), stage="writer")
+        self.assertEqual(caught.exception.code, "MODEL_INVALID_RESPONSE")
+
+    def test_streaming_transport_accumulates_content_without_reasoning_leak(self):
+        captured = {}
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "private"},
+                            "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "{"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "}"}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3,
+                                        "total_tokens": 5}},
+            "[DONE]",
+        ]
+        def fake_open(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeStreamResponse(chunks)
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions",
+            stage_generation_parameters={"writer": {"stream": True,
+                                                        "enable_thinking": True}},
+        )
+        client = ChatCompletionsClient(config)
+        with patch("urllib.request.urlopen", side_effect=fake_open):
+            result = client.call([], "text", Budget(1), stage="writer")
+        self.assertEqual(result, "{}")
+        self.assertTrue(captured["body"]["stream"])
+        self.assertEqual(client.total_usage["total_tokens"], 5)
+        self.assertTrue(client.call_events[0]["reasoning_content_present"])
+        self.assertEqual(client.call_events[0]["reasoning_content_chars"], 7)
+
+    def test_thinking_parameter_rejection_has_one_budgeted_compatibility_retry(self):
+        requests = []
+        payload = {"choices": [{"message": {"content": "{}"}}]}
+        def fake_open(request, timeout):
+            requests.append(json.loads(request.data.decode("utf-8")))
+            if len(requests) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url, 400, "bad request", {},
+                    io.BytesIO(b'{"error":"chat_template_kwargs.enable_thinking unsupported"}'),
+                )
+            return FakeResponse(payload)
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions",
+            stage_generation_parameters={
+                "planner": {"max_tokens": 8192, "enable_thinking": True},
+            },
+            compatibility_retry_without_thinking=True,
+        )
+        client = ChatCompletionsClient(config)
+        with patch("urllib.request.urlopen", side_effect=fake_open):
+            self.assertEqual(client.call([], "text", Budget(2), stage="planner"), "{}")
+        self.assertEqual(client.total_calls, 2)
+        self.assertIn("chat_template_kwargs", requests[0])
+        self.assertNotIn("chat_template_kwargs", requests[1])
+        self.assertTrue(client.call_events[0]["compatibility_downgrade_triggered"])
+        self.assertTrue(client.call_events[1]["compatibility_retry"])
+
+    def test_thinking_compatibility_retry_never_exceeds_remaining_budget(self):
+        def reject(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url, 400, "bad request", {},
+                io.BytesIO(b'{"error":"enable_thinking unsupported"}'),
+            )
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions",
+            stage_generation_parameters={"writer": {"enable_thinking": True}},
+            compatibility_retry_without_thinking=True,
+        )
+        client = ChatCompletionsClient(config)
+        budget = Budget(1)
+        with patch("urllib.request.urlopen", side_effect=reject):
+            with self.assertRaises(CaseError) as caught:
+                client.call([], "text", budget, stage="writer")
+        self.assertEqual(caught.exception.code, "MODEL_HTTP_ERROR")
+        self.assertEqual(client.total_calls, 1)
+        self.assertEqual(budget.remaining, 0)
+        self.assertFalse(client.call_events[0]["compatibility_downgrade_triggered"])
+        self.assertTrue(
+            client.call_events[0]["compatibility_downgrade_blocked_by_budget"]
+        )
+
+    def test_thinking_compatibility_downgrade_never_loops(self):
+        def reject(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url, 400, "bad request", {},
+                io.BytesIO(b'{"error":"enable_thinking unsupported"}'),
+            )
+        config = ModelConfig(
+            environment="competition", adapter="chat_completions", model="official",
+            endpoint="https://example.invalid/chat/completions",
+            stage_generation_parameters={"planner": {"enable_thinking": True}},
+            compatibility_retry_without_thinking=True,
+        )
+        client = ChatCompletionsClient(config)
+        with patch("urllib.request.urlopen", side_effect=reject):
+            with self.assertRaises(CaseError) as caught:
+                client.call([], "text", Budget(5), stage="planner")
+        self.assertEqual(caught.exception.code, "MODEL_HTTP_ERROR")
+        self.assertEqual(client.total_calls, 2)
+
+    def test_mlx_uses_stage_max_tokens_without_requiring_thinking_support(self):
+        captured = {}
+        module = types.ModuleType("mlx_lm")
+        module.load = lambda path: ("model", "tokenizer")
+        def generate(model, tokenizer, *, prompt, max_tokens, verbose):
+            captured["max_tokens"] = max_tokens
+            return "{}"
+        module.generate = generate
+        tokenizer = type("Tokenizer", (), {
+            "apply_chat_template": lambda self, messages, tokenize, add_generation_prompt: "prompt",
+        })()
+        config = ModelConfig(
+            environment="local", adapter="mlx_direct", model="local-qwen2.5",
+            stage_generation_parameters={"writer": {"max_tokens": 12288}},
+        )
+        client = MlxDirectClient(config)
+        client._loaded = ("model", tokenizer)
+        with patch.dict(sys.modules, {"mlx_lm": module}):
+            self.assertEqual(client.call([], "text", Budget(1), stage="writer"), "{}")
+        self.assertEqual(captured["max_tokens"], 12288)
+        self.assertIsNone(client.call_events[0]["generation_parameters"]["enable_thinking"])
 
     def test_dev_api_end_to_end_log_contains_usage(self):
         class FakeClient:

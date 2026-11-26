@@ -22,18 +22,20 @@ from .protocol import failed_result, success_result
 from .retrieval import DenseEvidenceRetriever
 
 
-VERSION = "0.4.9-prompt-v2-research-modules"
+VERSION = "0.4.10-qwen-stage-policy"
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parser():
     p = argparse.ArgumentParser(description="循证智录首次病程记录生成程序")
-    p.add_argument("--input", required=True, help="正式 JSON 数组或受支持的练习嵌套 JSON；相对路径按当前工作目录解析")
+    p.add_argument("--input", default=str(PACKAGE_ROOT / "input.json"),
+                   help="正式 JSON 数组或受支持的练习嵌套 JSON；默认读取程序根目录 input.json，相对路径按当前工作目录解析")
     p.add_argument("--input-format", choices=("auto", "competition", "practice"), default="auto",
                    help="输入协议；默认严格自动识别")
     p.add_argument("--practice-case-id", help="可选：覆盖练习病例的文件序号或脱敏稳定 case_id")
     p.add_argument("--practice-record-cutoff", help="练习文件无可靠记录时间时显式指定截止时间")
-    p.add_argument("--output", required=True, help="输出 JSON；相对路径按当前工作目录解析")
+    p.add_argument("--output", default=str(PACKAGE_ROOT / "output.json"),
+                   help="输出 JSON；默认写入程序根目录 output.json，相对路径按当前工作目录解析")
     p.add_argument("--mode", choices=("mock", "local", "dev_api", "competition"), default="competition")
     p.add_argument("--pipeline", choices=("baseline", "evidence_pipeline", "clinical_pipeline"), default="baseline")
     p.add_argument("--config", help="local/competition 模型配置 JSON；dev_api 仅读取指定环境变量")
@@ -42,6 +44,10 @@ def parser():
     p.add_argument("--retrieval-config", help="可选 Dense 检索配置 JSON；用于 evidence/clinical pipeline")
     p.add_argument("--graph-retrieval", choices=("off", "one_hop", "ppr"), default="off",
                    help="clinical_pipeline 可选病例内图引导重排；默认关闭")
+    p.add_argument("--retrieval-strategy",
+                   choices=("auto", "dense_graph", "lexical_graph", "no_graph"),
+                   default="auto",
+                   help="检索种子策略；auto 保留旧 CLI 行为，显式策略启用有审计的安全降级")
     p.add_argument("--clinical-agents", choices=("off", "adaptive", "always"), default="off",
                    help="可选反证代理：关闭、复杂病例触发或每例触发；最多一次额外调用")
     p.add_argument("--clinical-verification", choices=("on", "off"), default="on",
@@ -78,16 +84,18 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     official_zero_arg = not raw_argv
     profile_driven = official_zero_arg or not _has_explicit_algorithm_controls(raw_argv)
-    development_requested = os.environ.get("MEWTYPE_DEV_MODE", "").strip() == "1"
+    # The organiser's zero-argument entry point is always competition mode.
+    # Development mode remains available for the explicit two-argument workflow,
+    # but a leaked shell variable must never redirect `python main.py` to Bailian.
+    development_requested = (not official_zero_arg
+                             and os.environ.get("MEWTYPE_DEV_MODE", "").strip() == "1")
     selected_profile = (LOCAL_DEVELOPMENT_PROFILE if development_requested
                         else get_active_competition_profile()) if profile_driven else None
-    if official_zero_arg:
-        raw_argv = ["--input", str(PACKAGE_ROOT / "input.json"),
-                    "--output", str(PACKAGE_ROOT / "output.json"),
-                    "--log", str(PACKAGE_ROOT / "run_log.json")]
     if selected_profile:
         raw_argv.extend(profile_cli_arguments(selected_profile))
     args = parser().parse_args(raw_argv); started = time.time(); run_id = str(uuid.uuid4())
+    final_validation_mode = (selected_profile.final_validation_mode
+                             if selected_profile else "strict")
     output = Path(args.output); log_path = Path(args.log) if args.log else output.parent / "run_log.json"
     prompt_version = CLINICAL_PROMPT_VERSION if args.pipeline == "clinical_pipeline" else PROMPT_VERSION
     backup_paths = []
@@ -102,6 +110,7 @@ def main(argv=None):
            "runtime_profile": ("development_profile" if selected_profile and selected_profile.environment == "dev_api"
                                else "competition_profile" if selected_profile else "explicit_cli"),
            "algorithm_profile": (selected_profile.name if selected_profile else "explicit_cli"),
+           "final_validation_mode": final_validation_mode,
            "prompt_manifest": _prompt_manifest(args.pipeline, args.clinical_prompt_profile),
            "artifact_backups": backup_paths,
            "started_at_epoch": started, "model": None, "parameters": {}, "cases": [], "status": "running"}
@@ -114,11 +123,16 @@ def main(argv=None):
             raise TaskError("CLINICAL_CONFIG_INVALID", "--clinical-evidence-limit 必须在1到5之间。")
         if args.graph_retrieval != "off" and args.pipeline != "clinical_pipeline":
             raise TaskError("GRAPH_RETRIEVAL_SCOPE_INVALID", "图引导检索只允许 clinical_pipeline。")
+        retrieval_strategy, retrieval_fallback_enabled = _resolve_retrieval_policy(args)
         internal_official_retrieval = bool(
-            selected_profile and selected_profile.requires_official_embedding
+            retrieval_strategy == "dense_graph" and selected_profile
+            and selected_profile.requires_official_embedding
         )
-        internal_mock_retrieval = bool(selected_profile and selected_profile.requires_mock_embedding)
-        if (args.graph_retrieval != "off" and not args.retrieval_config
+        internal_mock_retrieval = bool(
+            retrieval_strategy == "dense_graph" and selected_profile
+            and selected_profile.requires_mock_embedding
+        )
+        if (retrieval_strategy == "dense_graph" and not args.retrieval_config
                 and not internal_official_retrieval and not internal_mock_retrieval):
             raise TaskError("GRAPH_RETRIEVAL_CONFIG_MISSING", "图引导检索必须显式提供 --retrieval-config。")
         if args.clinical_agents != "off" and args.pipeline != "clinical_pipeline":
@@ -150,6 +164,9 @@ def main(argv=None):
                                       "writing_guidance": args.clinical_writing_guidance,
                                       "shared_clinical_memory": args.shared_clinical_memory,
                                       "graph_retrieval": args.graph_retrieval,
+                                      "retrieval_strategy_requested": args.retrieval_strategy,
+                                      "retrieval_strategy": retrieval_strategy,
+                                      "retrieval_fallback_enabled": retrieval_fallback_enabled,
                                       "clinical_agents": args.clinical_agents,
                                       "stage_response_formats": clinical_stage_formats}
         recorder = _debug_recorder(args, run_id)
@@ -157,27 +174,42 @@ def main(argv=None):
         if recorder:
             client.debug_hook = recorder.record
         embedding_client = None; retrieval_options = None
-        if args.retrieval_config:
+        if args.retrieval_config and (args.pipeline == "evidence_pipeline"
+                                      or retrieval_strategy in ("dense_graph", "dense_only")):
             if args.pipeline not in ("evidence_pipeline", "clinical_pipeline"):
                 raise TaskError("RETRIEVAL_PIPELINE_INVALID", "Dense 检索只允许用于 evidence/clinical pipeline。")
             embedding_client, retrieval_options = load_embedding_client(Path(args.retrieval_config), args.mode)
             log["retrieval"] = {key: value for key, value in retrieval_options.items() if key != "vectors"}
+        elif args.retrieval_config:
+            raise TaskError("RETRIEVAL_CONFIG_UNUSED",
+                            "lexical_graph/no_graph 不读取 Embedding 配置；请移除 --retrieval-config。")
         elif internal_official_retrieval:
             embedding_client, retrieval_options = _official_profile_embedding(selected_profile)
             log["retrieval"] = {**retrieval_options, "protocol_status": "awaiting_official_contract"}
         elif internal_mock_retrieval:
             embedding_client, retrieval_options = _development_profile_embedding(selected_profile)
             log["retrieval"] = {**retrieval_options, "protocol_status": "development_mock_only"}
+        elif retrieval_strategy == "lexical_graph":
+            retrieval_options = {"provider": "lexical_bm25_cpu", "model": None, "top_k": 3,
+                                 "min_similarity": None, "max_chunk_chars": 240}
+            log["retrieval"] = {**retrieval_options, "protocol_status": "offline_stdlib"}
         if config:
             log["model"] = config.model
+            generation_policy = config.generation_policy_audit()
             log["parameters"] = {"adapter": config.adapter, "response_format": config.response_format,
                                  "max_calls_per_case": config.max_calls_per_case,
                                  "max_retries": config.max_retries,
                                  "generation_parameters_sent": config.send_generation_parameters,
+                                 "generation_policy": generation_policy,
+                                 "streaming_transport": any(
+                                     stage.get("stream", False)
+                                     for stage in generation_policy["stages"].values()
+                                 ),
                                  "authorization_header_sent": config.adapter == "dev_api_chat_completions"}
             if config.send_generation_parameters:
                 log["parameters"].update({"temperature": config.temperature, "top_p": config.top_p,
-                                          "max_tokens": config.max_tokens, "seed": config.seed})
+                                          "max_tokens": config.max_tokens, "seed": config.seed,
+                                          "timeout_seconds": config.timeout_seconds})
         else:
             log["model"] = "mock"; log["parameters"] = {"max_calls_per_case": maximum}
         loaded_input = load_input_cases(
@@ -212,7 +244,9 @@ def main(argv=None):
                                         clinical_stage_formats, args.clinical_prompt_profile,
                                         args.graph_retrieval, args.clinical_agents,
                                         args.clinical_writing_guidance,
-                                        args.shared_clinical_memory == "on")
+                                        args.shared_clinical_memory == "on",
+                                        retrieval_strategy, retrieval_fallback_enabled,
+                                        final_validation_mode)
                 _enforce_profile_safety(selected_profile, meta)
                 meta["token_usage"] = _usage_delta(usage_before, getattr(client, "total_usage", {}))
                 meta["stage_calls"] = list(getattr(client, "call_events", []))[events_before:]
@@ -269,7 +303,7 @@ def _client(args, config):
 
 _ALGORITHM_FLAGS = frozenset({
     "--mode", "--pipeline", "--config", "--mock-responses", "--retrieval-config",
-    "--graph-retrieval", "--clinical-agents", "--clinical-verification",
+    "--graph-retrieval", "--retrieval-strategy", "--clinical-agents", "--clinical-verification",
     "--clinical-revision", "--clinical-evidence-limit", "--clinical-prompt-profile",
     "--dev-response-format", "--clinical-response-format", "--planner-response-format",
     "--counter-evidence-response-format", "--writer-response-format",
@@ -282,6 +316,27 @@ def _has_explicit_algorithm_controls(argv: list[str]) -> bool:
     return any(argument in _ALGORITHM_FLAGS
                or any(argument.startswith(flag + "=") for flag in _ALGORITHM_FLAGS)
                for argument in argv)
+
+
+def _resolve_retrieval_policy(args) -> tuple[str, bool]:
+    if args.retrieval_strategy != "auto" and args.pipeline != "clinical_pipeline":
+        raise TaskError("RETRIEVAL_STRATEGY_SCOPE_INVALID",
+                        "显式检索策略只允许 clinical_pipeline。")
+    if args.retrieval_strategy == "auto":
+        if args.graph_retrieval != "off":
+            return "dense_graph", False
+        if args.pipeline == "clinical_pipeline" and args.retrieval_config:
+            return "dense_only", False
+        return "no_graph", False
+    if args.retrieval_strategy == "no_graph":
+        if args.graph_retrieval != "off":
+            raise TaskError("RETRIEVAL_STRATEGY_INVALID",
+                            "no_graph 必须同时设置 --graph-retrieval off。")
+        return "no_graph", False
+    if args.graph_retrieval == "off":
+        raise TaskError("RETRIEVAL_STRATEGY_INVALID",
+                        f"{args.retrieval_strategy} 必须启用 --graph-retrieval one_hop 或 ppr。")
+    return args.retrieval_strategy, True
 
 
 def _official_profile_embedding(profile):
@@ -338,12 +393,15 @@ def _prompt_manifest(pipeline: str, prompt_profile: str = "contrastive") -> dict
 
 
 def _enforce_profile_safety(profile, meta: dict) -> None:
-    if (profile and profile.block_unresolved_high_risk
-            and meta.get("clinical", {}).get("unresolved_risk_count", 0)):
+    clinical = meta.get("clinical", {})
+    guarantee = clinical.get("output_guarantee")
+    if (profile and profile.pipeline == "clinical_pipeline"
+            and isinstance(guarantee, dict)
+            and not guarantee.get("safe_record_available", False)):
         raise CaseError(
-            "UNRESOLVED_HIGH_RISK",
-            "正式 Clinical Profile 仍有未修复的高风险患者事实，禁止作为成功结果输出。",
-            {"partial_meta": meta, "failed_stage": "clinical_safety_gate"},
+            "OUTPUT_GUARANTEE_FAILED",
+            "Output Guarantee 未能形成结构合法且可安全输出的病历草稿。",
+            {"partial_meta": meta, "failed_stage": "output_guarantee"},
         )
 
 

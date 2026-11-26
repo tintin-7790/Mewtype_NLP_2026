@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 
 from .clinical_graph import ClinicalEvidenceGraph
-from .retrieval import DenseEvidenceRetriever, EvidenceCandidate
+from .retrieval import DenseEvidenceRetriever, EvidenceCandidate, LexicalEvidenceRetriever
 
 
 RELATION_WEIGHT = {
@@ -51,7 +51,8 @@ class GraphGuidedRetriever:
     constructed for exactly one Case instance.
     """
 
-    def __init__(self, dense: DenseEvidenceRetriever, graph: ClinicalEvidenceGraph, *,
+    def __init__(self, dense: DenseEvidenceRetriever | LexicalEvidenceRetriever,
+                 graph: ClinicalEvidenceGraph, *,
                  strategy: str = "one_hop", seed_k: int = 5, ppr_alpha: float = 0.2,
                  ppr_iterations: int = 20):
         if strategy not in ("one_hop", "ppr"):
@@ -130,7 +131,9 @@ class GraphGuidedRetriever:
                 "graph_mode": self.strategy,
                 "graph_fallback_reason": ";".join(fallback_reasons) if fallback_reasons else None,
                 "fallback_status": bool(fallback_reasons),
-                "embedding_provider": type(self.dense.client).__name__,
+                "seed_provider": self.dense.provider_name,
+                "embedding_provider": (self.dense.provider_name
+                                       if isinstance(self.dense, DenseEvidenceRetriever) else None),
                 "seed_fact_ids": _ordered_union(self.query_audits, "seed_fact_ids"),
                 "graph_edge_type_counts": self.graph.stats()["relations"],
                 "candidate_fact_ids": _ordered_union(self.query_audits, "candidate_fact_ids"),

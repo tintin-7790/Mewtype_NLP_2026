@@ -1,17 +1,119 @@
 {
-  "schema_status": "项目暂定格式，官方 Schema 待确认",
+  "schema_version": "1.0-project-defined",
+  "team_name": "北京语言大学Mewtype",
+  "algorithm_version": "v1",
+  "program_version": "0.4.10-qwen-stage-policy",
+  "hash_algorithm": "sha256",
+  "schema_note": "项目暂定资源清单格式；赛方如发布正式 Schema，应仅调整清单协议，不改变资源内容。",
+  "external_api_knowledge_base": "无。正式模型及可选 Embedding 只允许使用赛方批准的内网服务。",
+  "contains_real_patient_records": false,
+  "contains_model_weights": false,
+  "network_download_required": false,
   "resources": [
     {
-      "name": "Mewtype Clinical Writing Guidance v1",
-      "version": "2026-11-24",
-      "kind": "original_synthetic_style_guidance",
+      "id": "baseline_prompt",
+      "type": "prompt",
+      "path": "prompts/baseline_system.txt",
+      "version": "2026-11-23.baseline-v3",
+      "origin": "北京语言大学Mewtype 项目自研",
+      "purpose": "保留的 baseline_safe Profile 及 Planner 安全回退所用单次首次病程记录生成 Prompt",
+      "runtime_required": true,
+      "activation": "baseline_safe or explicit planner safety fallback",
+      "patient_data": false,
+      "sha256": "9363e1785742657634399f9ea3ddcbbdea630aa73541d7be7f46a8338d60a39b"
+    },
+    {
+      "id": "evidence_pipeline_prompts",
+      "type": "prompt_bundle",
+      "path": "prompts",
+      "origin": "北京语言大学Mewtype 项目自研",
+      "purpose": "可选 Evidence Pipeline 的事实整理、证据约束生成与核验",
+      "runtime_required": false,
+      "activation": "explicit pipeline=evidence_pipeline",
+      "patient_data": false,
+      "files_sha256": {
+        "evidence_system.txt": "6fccb0f3ed21b98f99dd1b56acd06efab7c5ed75069090e67eb6f067d22e64cd",
+        "fact_system.txt": "6032d702963748693806adc365f0c759a62f6b26a8096daa1d6bd045197b1dd7",
+        "verify_system.txt": "89e24c183d4dad3a33086c963a889dffb08968195b5f6f283c4c35d08653bf4d"
+      }
+    },
+    {
+      "id": "clinical_prompt_compatibility_set",
+      "type": "prompt_bundle",
+      "path": "prompts",
+      "origin": "北京语言大学Mewtype 项目自研",
+      "purpose": "兼容 legacy、contrastive 与 contrastive_fewshot Clinical Pipeline 配置",
+      "runtime_required": false,
+      "activation": "explicit clinical prompt profile other than contrastive_v2",
+      "patient_data": false,
+      "files_sha256": {
+        "claim_verify_system.txt": "589c6cb88b6abda8a5f6e9f3be507b32544c9e1624f1b974d3ab966643aed0ab",
+        "counter_evidence_system.txt": "d562dd6f98296d62b4d5a00634d8b96ef008ffd9216b6407a66bb3893a8c54ec",
+        "planner_system.txt": "1b1f0a001590e04c8c34438da159eb0e77051acddb5697cf2e396ad70fe99034",
+        "revise_system.txt": "4f79d8d12092d941a9e50c0afce784334702a5832976e5a5f39f51c58bd3ff65",
+        "writer_system.txt": "c0d47852aed35ed22aecdc1381f7f365c0ee2eef4028ed3512aa264edd008e93"
+      }
+    },
+    {
+      "id": "clinical_v1_archive",
+      "type": "archived_prompt_bundle",
+      "path": "prompts/archive/clinical-v1",
+      "origin": "北京语言大学Mewtype 项目自研",
+      "purpose": "Legacy Planner/Writer 兼容与有限回退；其余文件保留用于版本审计",
+      "runtime_required": false,
+      "activation": "legacy planner/writer compatibility path",
+      "patient_data": false,
+      "files_sha256": {
+        "claim_verify_system.txt": "852a3a5d3a70304640a4b43e87b89d1f79898fa24e44d44b107e5588301e8a7f",
+        "planner_system.txt": "4fa1f4b0937bf302ba301932d061960a2f6073a1e88472303c6e7d9a92b8820f",
+        "revise_system.txt": "b1a09476f0fa8d5d0a5f76a29b217eb87bfe07d12159a0d6bde17fc604d386e3",
+        "writer_system.txt": "161dbd5f3d1f70656740771b28fbb1a84072c5cb7bcb948e9b7765f20382cacf"
+      }
+    },
+    {
+      "id": "clinical_fewshot_examples",
+      "type": "original_synthetic_examples",
+      "path": "prompts/fewshot",
+      "origin": "北京语言大学Mewtype 项目原创合成教学示例",
+      "purpose": "可选 contrastive_fewshot Planner/Writer 的组织方式参考，不作为患者证据",
+      "runtime_required": false,
+      "activation": "clinical_prompt_profile=contrastive_fewshot",
+      "patient_data": false,
+      "files_sha256": {
+        "planner_examples.json": "c616bc1ab81acefd4adc231f83e50f4e7524c588d87002e795a36cec3a16333c",
+        "writer_examples.json": "3c7e54fcaca267d8dbaaa5d47017d9674ee47c33d4c0d9c49d236feb9526fdeb"
+      }
+    },
+    {
+      "id": "contrastive_v2_prompts",
+      "type": "prompt_bundle",
+      "path": "prompts/contrastive_v2",
+      "version": "2026-11-25.clinical-v4.8-full-record",
+      "origin": "北京语言大学Mewtype 项目自研",
+      "purpose": "完整本地开发 Profile 及候选高级比赛 Profile 的 Planner、Counter-Evidence、Writer、Verifier 和 Reviser Prompt",
+      "runtime_required": true,
+      "activation": "competition_full_v2, development_clinical_d_graph_agent, or clinical_prompt_profile=contrastive_v2",
+      "patient_data": false,
+      "files_sha256": {
+        "claim_verify_system.txt": "a7d04f933ffbda9c0e1826740da4e905b09da8aacf69e775bd032a20618fb6d4",
+        "counter_evidence_system.txt": "f5c3a5c6594737c86ebbe06b20dba513c49d8015584428632ea93a63deaa7627",
+        "planner_system.txt": "ff7270e571a37421d2895a6b897671e929cc94c9c2049bbd644e9fccb70573a0",
+        "prompt_sha256.json": "e656ee0b30c27dd9c336b99fc21334b6f4ca7161c9e501318dc07bee3b49e205",
+        "revise_system.txt": "5a690fd634715b93aa5cd352cfd830bf40edb201fffe5ce3208c8485b2c48f7e",
+        "writer_system.txt": "61146b3414883263d36dfe068face18e30bba34d80a1eab85f535c9f41822a2d"
+      }
+    },
+    {
+      "id": "clinical_writing_guidance_v1",
+      "type": "original_synthetic_writing_guidance",
       "path": "resources/clinical_writing",
-      "purpose": "Writer语言、结构与证据关联风格参考；不是患者事实、诊疗指南或source_ids来源",
-      "origin": "公开病历书写规范的原创研究概括，以及原创合成规则卡和教学示例",
-      "license_status": "包内声明未复制第三方患者病历；正式赛事再分发许可仍需团队最终复核",
-      "contains_real_patient_information": false,
-      "network_required": false,
-      "mandatory": false,
+      "version": "2026-11-24",
+      "origin": "北京语言大学Mewtype 项目内部原创整理，参考公开病历书写规范；未复制真实患者病历",
+      "purpose": "Writer 的结构、语气、证据关系和原创合成风格参考；不是患者事实或诊疗指南",
+      "runtime_required": true,
+      "activation": "competition_full_v2 or clinical_writing_guidance=rules/rules_examples",
+      "patient_data": false,
+      "license_status": "项目原创合成内容；正式再分发声明仍由团队最终确认",
       "files_sha256": {
         "evidence_relation_rules.json": "ab7670871ec47c389893b24f1df1b38326c17f280375aac22553e8cfa5840371",
         "grammar_patterns.json": "221d7958597a931843bd650453c454571d6fa4b7dfcb63d26bed3b5a3fbbc172",
@@ -22,19 +124,10 @@
       }
     }
   ],
-  "knowledge_resources": "可选临床写作风格资源；默认关闭，不作为患者事实或临床知识检索库",
   "notes": [
-    "程序包含对比式临床规划与问题条件化写作提示词、合成 Few-shot 示例、确定性 Problem–Evidence 组织与显著性排序、事实/原子陈述检查、日期等价规范化、证据选择压缩和非阻断风险披露规则，以及默认关闭的 Dense 检索、病例内临床图重排和一次性反证代理代码；不包含外部临床知识库、持久化向量索引、模型权重或 Adapter。",
-    "临床图只由当前病例 sources、确定性 Facts 和 Planner 推断关系临时构建；Planner/Agent 关系会标记为推断，不冒充患者事实或固定医学知识。",
-    "Claim Verifier 使用 checked_claim_ids 加问题清单的紧凑协议；Local Reviser 使用 Claim ID、字符区间或列表下标应用局部 Patch。两者均不引入外部知识资源。",
-    "Counter-Evidence Agent 使用 reviewed_problem_ids 加问题清单的紧凑协议；患者数值 Evidence 可在严格条件下用所引短来源原文确定性修复，不调用外部知识库。",
-    "Automatic Input Adapter 只在输入边界执行严格协议检测、Unicode 时间规范化和确定性练习病历展平；与离线转换工具共用实现，不增加医学知识资源，也不修改正式比赛来源编号。",
-    "Graph/PPR 离线 smoke 工具使用确定性 Mock 哈希向量，只验证病例内图、传播、重排与审计控制流；不包含 BGE 权重，不代表 Dense 语义质量或医学效果。",
-    "BGE-M3 默认关闭；FlagEmbedding 和本地权重不是正式依赖，也不随包分发。赛方 HTTP 协议未公布前 official 适配器会明确失败。",
-    "无参数正式运行只使用赛方提供的 MODEL_NAME 和完整 ENDPOINT；不携带开发凭据、本地权重或推测的官方 Embedding 协议字段。",
-    "正式算法由打包时固定的 competition Profile 选择；当前 baseline_safe，完整 Clinical/Graph/Agent Profile 仅在官方预算与 Embedding 协议验收后切换。",
-    "MEWTYPE_DEV_MODE=1 才允许开发 Profile 使用确定性 Mock Embedding；该向量仅验证 PPR/Agent 控制流，不是 BGE-M3，也不会被 competition Profile 自动采用。",
-    "五阶段 contrastive_v2 Prompt 以独立目录提供，当前正式与本地开发 Profile 均未默认启用；阶段 JSON Schema 未改变。",
-    "Shared Clinical Memory 是默认关闭的单病例进程内决策卡，不持久化、不跨病例；Verifier/Reviser 不读取该卡，仍以原始 Sources 为事实依据。"
+    "当前正式 Profile 为 competition_full_v2；contrastive_v2、临床写作资源、Shared Clinical Memory、Counter-Evidence Agent、Lexical Graph PPR、Verifier/Reviser 与 Lite Final Validation 均在正式路径启用。baseline_safe 作为可选择的独立安全 Profile 保留。",
+    "Shared Clinical Memory、病例内临床图和词法检索由代码在当前病例内临时构建，不包含持久化知识库或向量索引。",
+    "提交包不包含 BGE-M3、Qwen、MLX 权重、Adapter、FlagEmbedding 缓存、开发凭据或外部临床知识库。",
+    "所有 Prompt 和知识资源路径均由 tools/build_package.py 当前白名单包含的 prompts/ 与 resources/ 目录提供。"
   ]
 }

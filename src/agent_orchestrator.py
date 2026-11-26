@@ -70,7 +70,7 @@ def run_counter_evidence_agent(case: Case, facts: list[dict], clinical_plan: dic
         "problems": [_compact_problem(problem) for problem in clinical_plan.get("problems", [])],
         "retrieval_evidence": _compact_retrieval_evidence(evidence_bundles or [], facts),
         "retrieval_notice": (
-            "检索候选只用于定位反证或缺失证据；Dense 相似度、Graph/PPR 分数和排序均不证明事实成立，"
+            "检索候选只用于定位反证或缺失证据；Dense 相似度、词法分数、Graph/PPR 分数和排序均不证明事实成立，"
             "必须回到候选的 source_id 与已有 Fact ID。"
         ),
     }

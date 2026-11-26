@@ -7,10 +7,11 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from src.app import _enforce_profile_safety
+from src.app import PACKAGE_ROOT, _enforce_profile_safety, parser
 from src.config import load_config
 from src.competition_profile import LOCAL_DEVELOPMENT_PROFILE, PROFILES, get_active_competition_profile
 from src.errors import CaseError, TaskError
@@ -44,6 +45,7 @@ class OfficialRuntimeTests(unittest.TestCase):
         shutil.copy2(project / "main.py", self.root / "main.py")
         shutil.copytree(project / "src", self.root / "src")
         shutil.copytree(project / "prompts", self.root / "prompts")
+        shutil.copytree(project / "resources", self.root / "resources")
         self.requests = []
 
     def tearDown(self):
@@ -106,11 +108,21 @@ class OfficialRuntimeTests(unittest.TestCase):
     def _run(self, arguments=None, extra_env=None):
         environment = os.environ.copy()
         environment.pop("MEWTYPE_DEV_MODE", None)
+        if (self.root / "sitecustomize.py").exists():
+            environment["PYTHONPATH"] = str(self.root)
         environment.update(extra_env or {})
         return subprocess.run([sys.executable, "main.py", *(arguments or [])], cwd=self.root,
                               capture_output=True, text=True, timeout=15, env=environment)
 
+    def _activate_profile(self, name):
+        (self.root / "sitecustomize.py").write_text(
+            "import src.competition_profile as cp\n"
+            f"cp.ACTIVE_COMPETITION_PROFILE = {name!r}\n",
+            encoding="utf-8",
+        )
+
     def test_two_arg_competition_profile_writes_valid_output_without_auth(self):
+        self._activate_profile("baseline_safe")
         endpoint = self._start_server([{"content": json.dumps(_record(), ensure_ascii=False)}])
         self._write_runtime(endpoint)
         completed = self._run(
@@ -124,13 +136,93 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(output[0]["status"], "success")
         self.assertEqual(log["runtime_profile"], "competition_profile")
         self.assertEqual(log["algorithm_profile"], "baseline_safe")
+        self.assertEqual(log["final_validation_mode"], "lite")
         self.assertEqual(log["total_calls"], 1)
         event = log["cases"][0]["stage_calls"][0]
         self.assertEqual((event["stage"], event["finish_reason"]), ("model", "stop"))
         self.assertEqual(event["token_usage"]["total_tokens"], 30)
+        self.assertEqual(event["generation_parameters"]["max_tokens"], 8192)
+        policy = log["parameters"]["generation_policy"]
+        self.assertEqual(policy["name"], "qwen3.8-27b-stage-v1")
+        self.assertEqual(policy["timeout_seconds"], 900.0)
+        self.assertEqual(policy["stages"]["writer"]["max_tokens"], 12288)
         self.assertEqual(self.requests[0]["path"], "/official/full/chat/completions")
         self.assertIsNone(self.requests[0]["authorization"])
-        self.assertEqual(set(self.requests[0]["body"]), {"model", "messages", "stream"})
+        body = self.requests[0]["body"]
+        self.assertEqual(set(body), {
+            "model", "messages", "stream", "temperature", "top_p",
+            "max_tokens", "seed",
+        })
+        self.assertEqual(body["max_tokens"], 8192)
+        self.assertNotIn("chat_template_kwargs", body)
+        self.assertNotIn("response_format", body)
+
+    def test_parser_defaults_to_program_root_input_and_output(self):
+        args = parser().parse_args([])
+        self.assertEqual(Path(args.input), PACKAGE_ROOT / "input.json")
+        self.assertEqual(Path(args.output), PACKAGE_ROOT / "output.json")
+
+    def test_zero_arg_entry_ignores_leaked_development_environment(self):
+        self._activate_profile("baseline_safe")
+        endpoint = self._start_server([{"content": json.dumps(_record(), ensure_ascii=False)}])
+        self._write_runtime(endpoint)
+        completed = self._run(extra_env={
+            "MEWTYPE_DEV_MODE": "1",
+            "DASHSCOPE_API_KEY": "must-not-be-used",
+            "QWEN_BASE_URL": "https://external.invalid",
+            "QWEN_MODEL": "must-not-be-used",
+        })
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        log = json.loads((self.root / "run_log.json").read_text(encoding="utf-8"))
+        self.assertEqual(log["environment"], "competition")
+        self.assertEqual(log["algorithm_profile"], "baseline_safe")
+        self.assertEqual(self.requests[0]["body"]["model"], "official-qwen")
+        self.assertIsNone(self.requests[0]["authorization"])
+
+    def test_competition_lite_recovers_unverified_target_without_relaxing_patient_fact(self):
+        self._activate_profile("baseline_safe")
+        target = {
+            "case_features": "患者因胸痛入院。",
+            "diagnostic_discussion": "胸痛原因待查。",
+            "plan": "拟将收缩压控制在<120mmHg，并动态观察。",
+            "evidence": [{"statement": "患者因胸痛入院。", "source_ids": ["S001"],
+                          "kind": "fact"}],
+            "review_items": [],
+        }
+        endpoint = self._start_server([{"content": json.dumps(target, ensure_ascii=False)}])
+        self._write_runtime(endpoint, [{
+            "case_id": "C1", "record_cutoff": "T0",
+            "sources": [{"source_id": "S001", "content": "患者因胸痛入院。"}],
+        }])
+        completed = self._run(["--input", "input.json", "--output", "output.json"])
+        output = json.loads((self.root / "output.json").read_text(encoding="utf-8"))[0]
+        log = json.loads((self.root / "run_log.json").read_text(encoding="utf-8"))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output["status"], "success")
+        self.assertNotIn("<120mmHg", output["medical_record"]["plan"])
+        self.assertEqual(log["final_validation_mode"], "lite")
+        self.assertTrue(log["cases"][0]["final_validation_recovery"]
+                        ["plan_numeric_recovery"]["applied"])
+
+    def test_competition_lite_still_blocks_unsupported_patient_measurement(self):
+        self._activate_profile("baseline_safe")
+        fabricated = {
+            "case_features": "患者入院血压180/120mmHg。",
+            "diagnostic_discussion": "胸痛原因待查。",
+            "plan": "建议动态评估。",
+            "evidence": [],
+            "review_items": [],
+        }
+        endpoint = self._start_server([{"content": json.dumps(fabricated, ensure_ascii=False)}])
+        self._write_runtime(endpoint, [{
+            "case_id": "C1", "record_cutoff": "T0",
+            "sources": [{"source_id": "S001", "content": "患者因胸痛入院。"}],
+        }])
+        completed = self._run(["--input", "input.json", "--output", "output.json"])
+        output = json.loads((self.root / "output.json").read_text(encoding="utf-8"))[0]
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output["status"], "failed")
+        self.assertEqual(output["error"]["code"], "VALIDATION_FAILED")
 
     def test_two_arg_development_profile_adapts_root_practice_json(self):
         planner = {"problems": [{
@@ -169,6 +261,13 @@ class OfficialRuntimeTests(unittest.TestCase):
                          "redacted_content_fingerprint")
         self.assertTrue(log["cases"][0]["clinical"]["graph_retrieval"]["graph_executed"])
         self.assertTrue(log["cases"][0]["clinical"]["adaptive_agent"]["completed"])
+        self.assertEqual(log["clinical_config"]["prompt_profile"], "contrastive_v2")
+        self.assertEqual(log["clinical_config"]["writing_guidance"], "rules_examples")
+        self.assertEqual(log["clinical_config"]["shared_clinical_memory"], "on")
+        self.assertEqual(log["clinical_config"]["retrieval_strategy"], "dense_graph")
+        self.assertIn("prompts/contrastive_v2/planner_system.txt",
+                      log["prompt_manifest"]["files"])
+        self.assertTrue(log["cases"][0]["clinical"]["shared_clinical_memory"]["enabled"])
         self.assertEqual(len(log["artifact_backups"]), 2)
         self.assertTrue(all((self.root / path).is_file() for path in log["artifact_backups"]))
         self.assertTrue(all(request["body"]["response_format"]["type"] == "json_schema"
@@ -188,7 +287,23 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertIn("Extra data: line 67 column 1 (char 3660)", completed.stderr)
         self.assertFalse((self.root / "output.json").exists())
 
+    def test_practice08_invalid_json_is_reported_without_repair_or_model_call(self):
+        source = (self.project / "information" / "临床智录_练习病历数据集JSON" /
+                  "08_小儿内科_婴幼儿惊厥伴急性胃肠炎.json")
+        shutil.copy2(source, self.root / "input.json")
+        completed = self._run(
+            ["--input", "input.json", "--output", "output.json"],
+            {"MEWTYPE_DEV_MODE": "1", "DASHSCOPE_API_KEY": "test-only-not-secret",
+             "QWEN_BASE_URL": "http://127.0.0.1:9/chat/completions", "QWEN_MODEL": "qwen-plus-test"},
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("INPUT_INVALID_JSON", completed.stderr)
+        self.assertIn("Expecting ',' delimiter: line 67 column 6 (char 3542)",
+                      completed.stderr)
+        self.assertFalse((self.root / "output.json").exists())
+
     def test_multiple_cases_preserve_count_order_and_case_ids(self):
+        self._activate_profile("baseline_safe")
         contents = [{"content": json.dumps(_record(), ensure_ascii=False)} for _ in range(2)]
         endpoint = self._start_server(contents)
         cases = [{"case_id": case_id, "record_cutoff": "T0",
@@ -202,6 +317,7 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 2)
 
     def test_truncated_model_json_is_a_per_case_failure(self):
+        self._activate_profile("baseline_safe")
         endpoint = self._start_server([{"content": '{"case_features": "不完整"'}])
         self._write_runtime(endpoint)
         completed = self._run()
@@ -212,6 +328,7 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(log["cases"][0]["stage_calls"][0]["parse_error_type"], "INCOMPLETE_JSON")
 
     def test_http_error_is_explicit_and_not_mocked(self):
+        self._activate_profile("baseline_safe")
         endpoint = self._start_server([{"status": 503}])
         self._write_runtime(endpoint)
         completed = self._run()
@@ -221,8 +338,19 @@ class OfficialRuntimeTests(unittest.TestCase):
 
     def test_timeout_is_explicit(self):
         endpoint = self._start_server([{"content": json.dumps(_record()), "delay": 0.2}])
-        self._write_runtime(endpoint, extra_env="TIMEOUT_SECONDS=0.05\n")
-        completed = self._run()
+        self._write_runtime(endpoint)
+        config = {
+            "environment": "competition", "adapter": "chat_completions",
+            "model": "official-qwen", "endpoint": endpoint,
+            "response_format": "text", "timeout_seconds": 0.05,
+            "max_retries": 0, "max_calls_per_case": 1,
+            "send_generation_parameters": False,
+        }
+        (self.root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        completed = self._run([
+            "--input", "input.json", "--output", "output.json",
+            "--mode", "competition", "--config", "config.json", "--pipeline", "baseline",
+        ])
         output = json.loads((self.root / "output.json").read_text(encoding="utf-8"))
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(output[0]["error"]["code"], "MODEL_TIMEOUT")
@@ -232,8 +360,29 @@ class OfficialRuntimeTests(unittest.TestCase):
         env_file.write_text("MODEL_NAME=qwen-official\nENDPOINT=http://127.0.0.1/full\n", encoding="utf-8")
         config = load_config(None, "competition", "baseline", official_env_path=env_file)
         self.assertEqual(config.endpoint, "http://127.0.0.1/full")
-        self.assertFalse(config.send_generation_parameters)
+        self.assertTrue(config.send_generation_parameters)
         self.assertEqual(config.max_calls_per_case, 1)
+        self.assertEqual(config.timeout_seconds, 900.0)
+        self.assertEqual(config.max_retries, 0)
+        self.assertEqual(config.generation_for("planner")["max_tokens"], 8192)
+        self.assertEqual(config.generation_for("writer")["max_tokens"], 12288)
+        self.assertIsNone(config.generation_for("model")["enable_thinking"])
+        self.assertTrue(config.generation_for("writer")["enable_thinking"])
+        self.assertFalse(config.generation_for("verifier")["enable_thinking"])
+
+    def test_competition_env_does_not_consume_unrelated_development_secret(self):
+        env_file = self.root / ".env"
+        env_file.write_text(
+            "# official identity only\n"
+            "MODEL_NAME=qwen-official\n"
+            "ENDPOINT=http://127.0.0.1/full\n"
+            "DASHSCOPE_API_KEY=must-not-be-used\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"DASHSCOPE_API_KEY": "also-not-used"}):
+            config = load_config(None, "competition", "baseline", official_env_path=env_file)
+        self.assertEqual(config.credential_env, "")
+        self.assertEqual(config.adapter, "chat_completions")
 
     def test_missing_env_is_a_task_error(self):
         with self.assertRaises(TaskError) as caught:
@@ -241,7 +390,16 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "COMPETITION_ENV_MISSING")
 
     def test_build_time_profiles_have_explicit_bounded_budgets(self):
-        self.assertEqual(get_active_competition_profile().name, "baseline_safe")
+        self.assertEqual(get_active_competition_profile().name, "competition_full_v2")
+        full = PROFILES["competition_full_v2"]
+        self.assertEqual((full.pipeline, full.retrieval_strategy, full.graph_retrieval,
+                          full.clinical_agents, full.clinical_writing_guidance,
+                          full.shared_clinical_memory, full.final_validation_mode),
+                         ("clinical_pipeline", "lexical_graph", "ppr", "always",
+                          "rules_examples", True, "lite"))
+        self.assertEqual(full.qwen_calls_reserved, 5)
+        self.assertFalse(full.requires_mock_embedding)
+        self.assertFalse(full.requires_official_embedding)
         self.assertEqual(PROFILES["clinical_d"].qwen_calls_reserved, 4)
         self.assertEqual(PROFILES["clinical_d_agent"].qwen_calls_reserved, 5)
         advanced = PROFILES["clinical_d_graph_agent"]
@@ -249,18 +407,43 @@ class OfficialRuntimeTests(unittest.TestCase):
                          ("clinical_pipeline", "ppr", "always"))
         self.assertTrue(advanced.requires_official_embedding)
         self.assertTrue(advanced.block_unresolved_high_risk)
+        self.assertEqual(advanced.final_validation_mode, "lite")
+        self.assertEqual(advanced.retrieval_strategy, "dense_graph")
+        lexical = PROFILES["clinical_d_lexical_graph_agent"]
+        self.assertEqual((lexical.graph_retrieval, lexical.retrieval_strategy,
+                          lexical.requires_official_embedding),
+                         ("ppr", "lexical_graph", False))
+        no_graph = PROFILES["clinical_d_no_graph_agent"]
+        self.assertEqual((no_graph.graph_retrieval, no_graph.retrieval_strategy),
+                         ("off", "no_graph"))
         self.assertEqual((LOCAL_DEVELOPMENT_PROFILE.environment,
                           LOCAL_DEVELOPMENT_PROFILE.clinical_response_format,
-                          LOCAL_DEVELOPMENT_PROFILE.graph_retrieval),
-                         ("dev_api", "json_schema", "ppr"))
+                          LOCAL_DEVELOPMENT_PROFILE.graph_retrieval,
+                          LOCAL_DEVELOPMENT_PROFILE.retrieval_strategy,
+                          LOCAL_DEVELOPMENT_PROFILE.clinical_prompt_profile,
+                          LOCAL_DEVELOPMENT_PROFILE.clinical_writing_guidance,
+                          LOCAL_DEVELOPMENT_PROFILE.shared_clinical_memory),
+                         ("dev_api", "json_schema", "ppr", "dense_graph", "contrastive_v2",
+                          "rules_examples", True))
         self.assertTrue(LOCAL_DEVELOPMENT_PROFILE.requires_mock_embedding)
+        self.assertEqual(LOCAL_DEVELOPMENT_PROFILE.final_validation_mode, "strict")
 
-    def test_advanced_profile_blocks_unresolved_high_risk(self):
-        meta = {"clinical": {"unresolved_risk_count": 1}}
+    def test_advanced_profile_does_not_block_on_risk_count_alone(self):
+        meta = {"clinical": {"unresolved_risk_count": 1,
+                              "unresolved_hard_risk_count": 1,
+                              "final_quality_gate": {
+                                  "output_blocking_safety_failure": False,
+                              }}}
+        _enforce_profile_safety(PROFILES["clinical_d_graph_agent"], meta)
+
+    def test_profile_gate_is_owned_only_by_output_guarantee(self):
+        meta = {"clinical": {"unresolved_risk_count": 1,
+                              "unresolved_hard_risk_count": 1,
+                              "output_guarantee": {"safe_record_available": False}}}
         with self.assertRaises(CaseError) as caught:
             _enforce_profile_safety(PROFILES["clinical_d_graph_agent"], meta)
-        self.assertEqual(caught.exception.code, "UNRESOLVED_HIGH_RISK")
-        self.assertEqual(caught.exception.details["failed_stage"], "clinical_safety_gate")
+        self.assertEqual(caught.exception.code, "OUTPUT_GUARANTEE_FAILED")
+        self.assertEqual(caught.exception.details["failed_stage"], "output_guarantee")
 
     def test_two_arg_development_profile_executes_ppr_agent_verifier_and_reviser(self):
         planner = {"problems": [{
@@ -347,8 +530,12 @@ class OfficialRuntimeTests(unittest.TestCase):
         writer_payload = json.loads(self.requests[2]["body"]["messages"][-1]["content"])
         self.assertEqual(agent_payload["retrieval_evidence"][0]["candidates"][0]["graph_strategy"], "ppr")
         self.assertIn('"graph_strategy": "ppr"', json.dumps(writer_payload, ensure_ascii=False))
+        self.assertEqual(
+            [request["body"]["max_tokens"] for request in self.requests],
+            [8192, 8192, 12288, 8192, 8192],
+        )
 
-    def test_advanced_profile_discloses_embedding_failure_and_keeps_legal_d_agent_output(self):
+    def test_advanced_profile_uses_lexical_fallback_and_keeps_legal_d_agent_output(self):
         planner = {"problems": [{
             "problem_id": "PR001", "name": "发热", "priority": "high",
             "origin": "model_inference", "supporting_facts": ["F001"],
@@ -392,10 +579,23 @@ class OfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(output[0]["status"], "success")
         self.assertEqual(log["total_calls"], 4)
         clinical = log["cases"][0]["clinical"]
-        self.assertFalse(clinical["graph_retrieval"]["graph_executed"])
-        self.assertEqual(clinical["graph_retrieval"]["graph_fallback_reason"],
+        graph = clinical["graph_retrieval"]
+        self.assertTrue(graph["graph_executed"])
+        self.assertEqual(graph["retrieval_strategy"], "lexical_graph")
+        self.assertEqual(graph["seed_provider"], "lexical_bm25_cpu")
+        self.assertEqual(graph["embedding_provider"], "FailingEmbedding")
+        self.assertEqual(graph["retrieval_fallbacks"][0]["reason"],
                          "graph_retrieval_failed:OFFICIAL_EMBEDDING_UNAVAILABLE")
         self.assertTrue(clinical["adaptive_agent"]["completed"])
+        self.assertEqual(
+            [request["body"]["max_tokens"] for request in self.requests],
+            [8192, 8192, 12288, 8192],
+        )
+        self.assertEqual(
+            [request["body"]["chat_template_kwargs"]["enable_thinking"]
+             for request in self.requests],
+            [True, True, True, False],
+        )
 
 
 if __name__ == "__main__":

@@ -17,16 +17,25 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 HARD_ERROR_CODES = {
     "PATIENT_FACT_CONTRADICTION", "NUMERIC_VALUE_ERROR", "UNIT_ERROR", "TEMPORAL_CONFLICT",
     "CORRECTION_IGNORED", "UNSUPPORTED_NEGATIVE", "PLAN_AS_COMPLETED", "RESULT_AS_AVAILABLE",
-    "DIAGNOSIS_CERTAINTY_UPGRADE", "SOURCE_MISMATCH",
+    "DIAGNOSIS_CERTAINTY_UPGRADE", "SOURCE_MISMATCH", "INTERNAL_AUDIT_LEAK",
+    "TECHNICAL_REVIEW_ITEM",
 }
+
+TECHNICAL_REVIEW_PATTERNS = (
+    r"\b(?:Fact|Claim|Problem)\s*ID\b", r"\bsource_ids?\b", r"\bJSON\b",
+    r"\bSchema\b", r"\bVerifier\b", r"\bPrompt\b", r"\bAPI\b",
+    r"错误引用来源编号", r"模型生成错误", r"程序(?:运行|错误)", r"自动核验",
+    r"修订失败", r"解析失败", r"调用失败",
+)
 
 
 def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_plan: dict,
                        retriever, retrieval_top_k: int, client, response_format: str,
                        budget: Budget, prompt_profile: str = "contrastive",
-                       prompt_audit: dict | None = None) -> dict:
+                       prompt_audit: dict | None = None,
+                       internal_ids: set[str] | None = None) -> dict:
     preparation_started = time.perf_counter()
-    deterministic = deterministic_claim_issues(case, claims)
+    deterministic = deterministic_claim_issues(case, claims, internal_ids)
     candidates = []
     if retriever is not None:
         for claim in claims:
@@ -48,7 +57,8 @@ def run_claim_verifier(case: Case, claims: list[dict], record: dict, clinical_pl
                                        "code": issue["error_type"],
                                        "severity": issue["severity"],
                                        "source_ids": issue["source_ids"]}
-                                      for issue in deterministic],
+                                      for issue in deterministic
+                                      if issue["error_type"] in VERIFIER_ISSUE_CODES],
     }
     system, _ = load_clinical_prompt("verifier", prompt_profile, "")
     if prompt_audit is not None:
@@ -121,13 +131,33 @@ def _compact_claim(claim: dict) -> dict:
             "declared_source_ids": claim.get("source_ids", [])}
 
 
-def deterministic_claim_issues(case: Case, claims: list[dict]) -> list[dict]:
+def deterministic_claim_issues(case: Case, claims: list[dict],
+                               internal_ids: set[str] | None = None) -> list[dict]:
     corpus = "\n".join(source.content for source in case.sources)
     issues = []
     for claim in claims:
         statement = claim["statement"]
         section = claim["section"]
-        if ("当前" in statement and any(word in statement for word in ("尚未", "未开始", "未接受", "未进行"))
+        leaked_ids = find_internal_ids(statement, internal_ids or set())
+        if leaked_ids:
+            issues.append(_issue(
+                claim, "INTERNAL_AUDIT_LEAK", "high",
+                "删除内部阶段标识，并依据原始 sources 重新表述患者事实或临床推断。", [],
+            ))
+        if section == "review_items" and is_technical_review_item(statement):
+            issues.append(_issue(
+                claim, "TECHNICAL_REVIEW_ITEM", "high",
+                "该条属于内部质量审计，不是临床待核事项，应从正式输出移除并仅记入运行日志。", [],
+            ))
+        weak_negative_refs = _weak_negative_overreach_sources(case, statement)
+        if weak_negative_refs:
+            issues.append(_issue(
+                claim, "UNSUPPORTED_NEGATIVE", "high",
+                "原文只有弱阴性或未见明确表现，不得改写为明确否定，也不得据此充分排除隐匿性疾病。",
+                weak_negative_refs,
+            ))
+        if ("当前" in statement and any(word in statement for word in
+                                        ("尚未开始", "未开始", "未接受", "未进行", "未用药", "未使用"))
                 and re.search(r"当前.{0,10}(?:未提供|不详|未知)", corpus)):
             issues.append(_issue(claim, "NOT_ADDRESSED", "high",
                                  "原始资料未明确当前状态，不得将未提供写成确定否定事实。", []))
@@ -176,6 +206,53 @@ def deterministic_claim_issues(case: Case, claims: list[dict]) -> list[dict]:
             issues.append(_issue(claim, "FACT_CONTRADICTION", "high",
                                  "生成陈述与原始资料中的明确患者事实相反。", contradiction_refs))
     return _merge_issues([], issues)
+
+
+def find_internal_ids(text: str, internal_ids: set[str]) -> list[str]:
+    """Find only IDs created in this run, avoiding broad medical-text regexes."""
+    if not isinstance(text, str):
+        return []
+    found = []
+    for value in sorted(internal_ids, key=lambda item: (-len(item), item)):
+        if not value:
+            continue
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])"
+        if re.search(pattern, text):
+            found.append(value)
+    if "CASE_LOCAL_DECISION_CARDS_NOT_PATIENT_EVIDENCE" in text:
+        found.append("CASE_LOCAL_DECISION_CARDS_NOT_PATIENT_EVIDENCE")
+    return found
+
+
+def is_technical_review_item(text: str) -> bool:
+    return isinstance(text, str) and any(
+        re.search(pattern, text, flags=re.IGNORECASE) for pattern in TECHNICAL_REVIEW_PATTERNS
+    )
+
+
+def _weak_negative_overreach_sources(case: Case, statement: str) -> list[str]:
+    asserts_exclusion = ("排除" in statement
+                         and not any(phrase in statement for phrase in
+                                     ("不能排除", "无法排除", "尚不能排除", "不具排他")))
+    strong = ("明确否定" in statement or asserts_exclusion
+              or "不支持" in statement or re.search(r"削弱.{0,12}可能性", statement))
+    if not strong:
+        return []
+    result = []
+    claim_grams = _meaningful_bigrams(statement)
+    for source in case.sources:
+        if not re.search(r"未见明确|未明确|尚无明确|无明显", source.content):
+            continue
+        if len(claim_grams & _meaningful_bigrams(source.content)) >= 2:
+            result.append(source.source_id)
+    return result
+
+
+def _meaningful_bigrams(text: str) -> set[str]:
+    compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text)
+    ignored = {"患者", "明确", "可能", "诊断", "目前", "现有", "记录"}
+    return {compact[index:index + 2] for index in range(max(0, len(compact) - 1))
+            if compact[index:index + 2] not in ignored}
 
 
 def has_blocking_issues(verification: dict) -> bool:

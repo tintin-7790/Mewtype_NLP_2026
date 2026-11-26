@@ -7,6 +7,22 @@ from pathlib import Path
 from .errors import TaskError
 
 
+OFFICIAL_HTTP_TIMEOUT_SECONDS = 900.0
+OFFICIAL_GENERATION_POLICY = "qwen3.8-27b-stage-v1"
+OFFICIAL_STAGE_GENERATION_PARAMETERS = {
+    # Single-call baseline paths do not send the optional template flag: if a
+    # server does not implement it there is no spare call for a compatibility
+    # retry. Multi-stage clinical paths retain the explicit stage policy.
+    "model": {"max_tokens": 8192, "enable_thinking": None},
+    "planner": {"max_tokens": 8192, "enable_thinking": True},
+    "counter_evidence": {"max_tokens": 8192, "enable_thinking": True},
+    "writer": {"max_tokens": 12288, "enable_thinking": True},
+    "verifier": {"max_tokens": 8192, "enable_thinking": False},
+    "reviser": {"max_tokens": 8192, "enable_thinking": False},
+    "baseline_fallback": {"max_tokens": 8192, "enable_thinking": None},
+}
+
+
 @dataclass
 class ModelConfig:
     environment: str
@@ -17,14 +33,58 @@ class ModelConfig:
     fallback_response_formats: list[str] = field(default_factory=list)
     temperature: float = 0.0
     top_p: float = 1.0
-    max_tokens: int = 2048
-    timeout_seconds: float = 120.0
+    max_tokens: int = 8192
+    timeout_seconds: float = OFFICIAL_HTTP_TIMEOUT_SECONDS
     max_retries: int = 0
     max_calls_per_case: int = 1
     seed: int = 20261125
     extra_body: dict = field(default_factory=dict)
     credential_env: str = ""
     send_generation_parameters: bool = True
+    stream: bool = False
+    enable_thinking: bool | None = None
+    stage_generation_parameters: dict[str, dict] = field(default_factory=dict)
+    generation_policy: str = "global"
+    compatibility_retry_without_thinking: bool = False
+
+    def generation_for(self, stage: str) -> dict:
+        """Resolve one auditable generation policy without mutating config."""
+        policy = {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": self.max_tokens,
+            "seed": self.seed,
+            "stream": self.stream,
+            "enable_thinking": self.enable_thinking,
+        }
+        override = self.stage_generation_parameters.get(stage, {})
+        if not isinstance(override, dict):
+            raise TaskError("CONFIG_INVALID", f"阶段 {stage} 的生成参数必须是对象。")
+        allowed = set(policy)
+        unknown = sorted(set(override) - allowed)
+        if unknown:
+            raise TaskError(
+                "CONFIG_INVALID",
+                f"阶段 {stage} 含未知生成参数：{', '.join(unknown)}。",
+            )
+        policy.update(override)
+        if not isinstance(policy["max_tokens"], int) or policy["max_tokens"] < 1:
+            raise TaskError("CONFIG_INVALID", f"阶段 {stage} 的 max_tokens 必须为正整数。")
+        if not isinstance(policy["stream"], bool):
+            raise TaskError("CONFIG_INVALID", f"阶段 {stage} 的 stream 必须为布尔值。")
+        if policy["enable_thinking"] not in (True, False, None):
+            raise TaskError("CONFIG_INVALID", f"阶段 {stage} 的 enable_thinking 必须为布尔值或 null。")
+        return policy
+
+    def generation_policy_audit(self) -> dict:
+        stages = set(self.stage_generation_parameters) or {"model"}
+        return {
+            "name": self.generation_policy,
+            "timeout_seconds": self.timeout_seconds,
+            "send_generation_parameters": self.send_generation_parameters,
+            "compatibility_retry_without_thinking": self.compatibility_retry_without_thinking,
+            "stages": {stage: self.generation_for(stage) for stage in sorted(stages)},
+        }
 
 
 def load_config(path: Path | None, mode: str, pipeline: str, minimum_calls: int | None = None,
@@ -44,7 +104,12 @@ def load_config(path: Path | None, mode: str, pipeline: str, minimum_calls: int 
         return ModelConfig(environment="dev_api", adapter="dev_api_chat_completions",
                            model=values["QWEN_MODEL"], endpoint=endpoint,
                            response_format="text", max_calls_per_case=minimum,
-                           credential_env="DASHSCOPE_API_KEY")
+                           credential_env="DASHSCOPE_API_KEY",
+                           stage_generation_parameters={
+                               stage: {"max_tokens": values["max_tokens"]}
+                               for stage, values in OFFICIAL_STAGE_GENERATION_PARAMETERS.items()
+                           },
+                           generation_policy="development-wide-token-v1")
     if mode == "competition" and path is None and official_env_path is not None:
         return _load_official_env(official_env_path, minimum)
     if path is None:
@@ -79,26 +144,31 @@ def _load_official_env(path: Path, minimum_calls: int) -> ModelConfig:
     """Load the zero-argument competition profile without importing dotenv.
 
     ENDPOINT is already the complete Chat Completions URL and is deliberately
-    preserved verbatim.  Optional timeout/retry controls are engineering
-    safeguards, not assumptions about the unpublished service quota.
+    preserved verbatim.  The organiser-facing file contributes exactly the
+    published MODEL_NAME and ENDPOINT values; timeout and retry policy remain
+    bounded internal settings rather than unpublished .env fields.
     """
     values = _read_env_file(path)
     missing = [name for name in ("MODEL_NAME", "ENDPOINT") if not values.get(name, "").strip()]
     if missing:
         raise TaskError("COMPETITION_ENV_MISSING", f".env 缺少：{', '.join(missing)}")
-    timeout = _positive_float(values.get("TIMEOUT_SECONDS", "120"), "TIMEOUT_SECONDS")
-    retries = _bounded_int(values.get("MAX_RETRIES", "0"), "MAX_RETRIES", 0, 10)
-    maximum = minimum_calls + retries
     return ModelConfig(
         environment="competition",
         adapter="chat_completions",
         model=values["MODEL_NAME"].strip(),
         endpoint=values["ENDPOINT"].strip(),
         response_format="text",
-        timeout_seconds=timeout,
-        max_retries=retries,
-        max_calls_per_case=maximum,
-        send_generation_parameters=False,
+        max_tokens=8192,
+        timeout_seconds=OFFICIAL_HTTP_TIMEOUT_SECONDS,
+        max_retries=0,
+        max_calls_per_case=minimum_calls,
+        send_generation_parameters=True,
+        stage_generation_parameters={
+            stage: dict(values)
+            for stage, values in OFFICIAL_STAGE_GENERATION_PARAMETERS.items()
+        },
+        generation_policy=OFFICIAL_GENERATION_POLICY,
+        compatibility_retry_without_thinking=True,
     )
 
 
@@ -128,26 +198,6 @@ def _read_env_file(path: Path) -> dict[str, str]:
             value = value[1:-1]
         values[key] = value
     return values
-
-
-def _positive_float(value: str, name: str) -> float:
-    try:
-        parsed = float(value)
-    except ValueError as exc:
-        raise TaskError("COMPETITION_ENV_INVALID", f"{name} 必须为正数。") from exc
-    if parsed <= 0:
-        raise TaskError("COMPETITION_ENV_INVALID", f"{name} 必须为正数。")
-    return parsed
-
-
-def _bounded_int(value: str, name: str, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise TaskError("COMPETITION_ENV_INVALID", f"{name} 必须为整数。") from exc
-    if not minimum <= parsed <= maximum:
-        raise TaskError("COMPETITION_ENV_INVALID", f"{name} 必须在 {minimum} 到 {maximum} 之间。")
-    return parsed
 
 
 def _minimum_calls(pipeline: str) -> int:
